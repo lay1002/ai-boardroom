@@ -1,0 +1,16 @@
+services:
+  postgres:
+    image: postgres:17
+    container_name: boardroom-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: boardroom
+      POSTGRES_USER: boardroom
+      POSTGRES_PASSWORD: boardroom_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - boardroom_postgres_data:/var/lib/postgresql/data
+
+volumes:
+  boardroom_postgres_data:
