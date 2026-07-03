@@ -212,6 +212,28 @@ reviews/<sprint-id>/round-<nnn>/
 - Review Bridge must record the Sprint Type in both `consensus_report.md` and `final_consensus.md`.
 - Review Bridge must determine which artifacts are missing based on Sprint Type.
 
+## Fill Artifacts Step
+
+After `skeleton` creates the round files, the files are placeholders only.
+
+Before running Review Bridge `consensus`, the responsible roles must replace placeholder content with actual Sprint content and review results.
+
+For an Implementation Sprint, the following files must contain actual content before `consensus` runs:
+
+```text
+architecture.md
+claude_report.md
+codex_review.md
+claude_reply.md
+codex_final_review.md
+```
+
+`codex_prompt.md` is a review prompt artifact and must not be treated as a replacement for actual Claude or Codex review results.
+
+Placeholder files are not valid consensus input. If deterministic markers are missing because placeholders were not replaced, Review Bridge must produce `Gate Status: FAIL`.
+
+`check` validates required input artifact presence only. It does not prove that placeholder content has been replaced or that deterministic markers will pass consensus.
+
 ## Review Round Naming
 
 Each round must use the same fixed file names defined above.
