@@ -19,31 +19,50 @@ set -euo pipefail
 ###############################################################################
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-REVIEWS_DIR="$REPO_ROOT/reviews"
+REVIEWS_DIR="${REVIEWS_OVERRIDE:-$REPO_ROOT/reviews}"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
+
+die_usage() { echo "ERROR: $*" >&2; echo "Run 'review_bridge.sh' without arguments for usage." >&2; exit 1; }
 
 usage() {
   cat <<'EOF'
 Usage: review_bridge.sh <command> [arguments...] [--dry-run]
 
+Review Bridge Automation MVP — manages sprint review artifacts and consensus gates.
+
 Commands:
-  init                        <sprint-id>
+  init                        <sprint-id> [<round>]
+                              Create sprint directory, sprint_meta.env, and optional round directory.
   skeleton                    <sprint-id> <round> --type <implementation|documentation>
+                              Create input-artifact skeletons. Does NOT create gate artifacts.
   check                       <sprint-id> <round>
+                              Check required input artifacts. Reports Missing / Placeholder / Ready.
   validate-final-consensus    <sprint-id>
+                              Validate final_consensus.md placement (post-finalize, pre-commit).
   consensus                   <sprint-id> <round>
+                              Parse deterministic markers and produce consensus_report.md.
   finalize                    <sprint-id> <round>
+                              Produce final_consensus.md only when Gate Status is PASS.
 
 Notes:
-  skeleton creates placeholder input artifacts only.
-  Before running consensus, replace placeholders with actual review content.
-  Implementation Sprint requires actual content in:
-    architecture.md
-    claude_report.md
-    codex_review.md
-    claude_reply.md
-    codex_final_review.md
+  - skeleton creates placeholder input artifacts only.
+  - Before running consensus, replace placeholders with actual review content.
+  - Placeholder files are detected by the marker "TEMPLATE ONLY" in the file body.
+  - Placeholder files cannot pass consensus.
+  - Implementation Sprint requires actual content in:
+      architecture.md
+      claude_report.md
+      codex_review.md
+      claude_reply.md
+      codex_final_review.md
+  - Documentation Sprint requires actual content in:
+      reviewed_document.md
+      claude_report.md
+      codex_review.md
+      claude_reply.md
+      codex_final_review.md
+  - codex_prompt.md is a review prompt artifact and does not require deterministic markers.
 EOF
   exit 1
 }
@@ -172,6 +191,9 @@ CURRENT_ROUND=
 EOF
   fi
 
+  echo "Created: $sprint_dir"
+  echo "Written: $meta_file"
+
   # Create round directory if round number provided
   if [[ -n "$round" ]]; then
     local normalized
@@ -181,6 +203,7 @@ EOF
       die "Round directory already exists: $round_dir"
     fi
     mkdir -p "$round_dir"
+    echo "Created: $round_dir"
   fi
 }
 
@@ -291,6 +314,42 @@ EOF
 }
 
 ###############################################################################
+# Placeholder detection
+###############################################################################
+
+# Check if a file contains placeholder content.
+# Returns 0 (true) if file is a placeholder, 1 (false) if it has real content.
+is_placeholder() {
+  local file="$1"
+  # Skeleton-generated files contain this exact marker
+  if grep -q "^TEMPLATE ONLY$" "$file" 2>/dev/null; then
+    return 0
+  fi
+  return 1
+}
+
+# Per docs/development/consensus-workflow.md Fill Artifacts Step, codex_prompt.md
+# is a review prompt artifact, not a review result, and is not in the list of
+# files that must contain actual content before consensus runs. A placeholder
+# codex_prompt.md must not block consensus.
+CONSENSUS_BLOCKING_EXEMPT=("codex_prompt.md")
+
+# Filter a required-artifacts array down to the ones whose placeholder status
+# blocks consensus (i.e. excludes CONSENSUS_BLOCKING_EXEMPT).
+# Usage: fill_artifacts=($(blocking_artifacts "${required[@]}"))
+blocking_artifacts() {
+  local f
+  for f in "$@"; do
+    local exempt=false
+    local ex
+    for ex in "${CONSENSUS_BLOCKING_EXEMPT[@]}"; do
+      [[ "$f" == "$ex" ]] && exempt=true && break
+    done
+    $exempt || echo "$f"
+  done
+}
+
+###############################################################################
 # Command: check
 ###############################################################################
 
@@ -341,22 +400,74 @@ cmd_check() {
       ;;
   esac
 
+  # Artifacts whose placeholder status actually blocks consensus (excludes
+  # codex_prompt.md per consensus-workflow.md Fill Artifacts Step).
+  local -a fill_artifacts=()
+  while IFS= read -r f; do
+    fill_artifacts+=("$f")
+  done < <(blocking_artifacts "${required[@]}")
+
   local missing=()
+  local placeholder=()
+  local ready=()
+  local blocking_placeholder=()
+
   for f in "${required[@]}"; do
-    if [[ ! -f "$round_dir/$f" ]]; then
+    local fp="$round_dir/$f"
+    if [[ ! -f "$fp" ]]; then
       missing+=("$f")
+    elif is_placeholder "$fp"; then
+      placeholder+=("$f")
+    else
+      ready+=("$f")
     fi
   done
 
+  for f in "${fill_artifacts[@]}"; do
+    local fp="$round_dir/$f"
+    if [[ -f "$fp" ]] && is_placeholder "$fp"; then
+      blocking_placeholder+=("$f")
+    fi
+  done
+
+  # Print per-file status
   if [[ ${#missing[@]} -gt 0 ]]; then
-    echo "FAIL: Missing required input artifacts:"
+    echo "Missing:"
     for m in "${missing[@]}"; do
-      echo "  - $m"
+      echo "  - $m: MISSING"
     done
-    exit 1
   fi
 
-  echo "PASS: All required input artifacts present."
+  if [[ ${#placeholder[@]} -gt 0 ]]; then
+    echo "Placeholder:"
+    for p in "${placeholder[@]}"; do
+      echo "  - $p: PLACEHOLDER"
+    done
+  fi
+
+  if [[ ${#ready[@]} -gt 0 ]]; then
+    echo "Ready:"
+    for r in "${ready[@]}"; do
+      echo "  - $r: READY"
+    done
+  fi
+
+  # Overall status
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    echo ""
+    echo "FAIL: ${#missing[@]} missing, ${#placeholder[@]} placeholder(s)."
+    exit 1
+  elif [[ ${#blocking_placeholder[@]} -gt 0 ]]; then
+    echo ""
+    echo "WARNING: ${#blocking_placeholder[@]} placeholder(s) blocking consensus. Replace before running consensus."
+    echo "PLACEHOLDER"
+  elif [[ ${#placeholder[@]} -gt 0 ]]; then
+    echo ""
+    echo "PASS: All artifacts required for consensus are ready. ${#placeholder[@]} non-blocking placeholder(s) (codex_prompt.md is not required for consensus)."
+  else
+    echo ""
+    echo "PASS: All ${#ready[@]} input artifacts ready."
+  fi
 }
 
 ###############################################################################
@@ -540,39 +651,59 @@ cmd_consensus() {
 
   # 3. codex_review Final Recommendation
   if [[ "$codex_rec" != "PASS" ]]; then
-    fail_reasons+=("codex_review Final Recommendation is not PASS: $codex_rec")
+    fail_reasons+=("codex_review Final Recommendation is not PASS: ${codex_rec:-<not found>}")
   fi
 
   # 4. claude_reply Must Fix Addressed
   if [[ "$reply_must_fix" != "Yes" ]]; then
-    fail_reasons+=("claude_reply Must Fix Addressed is not Yes: $reply_must_fix")
+    fail_reasons+=("claude_reply Must Fix Addressed is not Yes: ${reply_must_fix:-<not found>}")
   fi
 
   # 5. claude_reply Architecture Conflict Addressed
   if [[ "$reply_arch_conflict" != "Yes" ]]; then
-    fail_reasons+=("claude_reply Architecture Conflict Addressed is not Yes: $reply_arch_conflict")
+    fail_reasons+=("claude_reply Architecture Conflict Addressed is not Yes: ${reply_arch_conflict:-<not found>}")
   fi
 
   # 6. claude_reply Final Recommendation
   if [[ "$reply_rec" != "PASS" ]]; then
-    fail_reasons+=("claude_reply Final Recommendation is not PASS: $reply_rec")
+    fail_reasons+=("claude_reply Final Recommendation is not PASS: ${reply_rec:-<not found>}")
   fi
 
   # 7. codex_final_review Final Recommendation
   if [[ "$final_rec" != "PASS" ]]; then
-    fail_reasons+=("codex_final_review Final Recommendation is not PASS: $final_rec")
+    fail_reasons+=("codex_final_review Final Recommendation is not PASS: ${final_rec:-<not found>}")
   fi
 
   # 8. claude_report Scope Expansion
   if [[ "$scope_expansion" != "No" ]]; then
-    fail_reasons+=("claude_report Scope Expansion is not No: $scope_expansion")
+    fail_reasons+=("claude_report Scope Expansion is not No: ${scope_expansion:-<not found>}")
   fi
 
+  # Check for placeholder artifacts before marker evaluation.
+  # Excludes codex_prompt.md (see blocking_artifacts): per consensus-workflow.md
+  # Fill Artifacts Step, it is a review prompt artifact, not a review result,
+  # and must not block consensus by itself.
+  local -a fill_artifacts=()
+  while IFS= read -r f; do
+    fill_artifacts+=("$f")
+  done < <(blocking_artifacts "${required[@]}")
+
+  local -a placeholders=()
+  for f in "${fill_artifacts[@]}"; do
+    local fp="$round_dir/$f"
+    if [[ -f "$fp" ]] && is_placeholder "$fp"; then
+      placeholders+=("$f")
+    fi
+  done
+
   local gate_status
-  if [[ ${#fail_reasons[@]} -eq 0 ]]; then
+  if [[ ${#fail_reasons[@]} -eq 0 && ${#placeholders[@]} -eq 0 ]]; then
     gate_status="PASS"
   else
     gate_status="FAIL"
+    if [[ ${#placeholders[@]} -gt 0 ]]; then
+      fail_reasons+=("Placeholder artifacts detected (must be replaced before consensus): ${placeholders[*]}")
+    fi
   fi
 
   # Build consensus_report.md
@@ -609,6 +740,14 @@ cmd_consensus() {
     echo "- codex_final_review Final Recommendation: ${final_rec:-<not found>}"
     echo "- claude_report Scope Expansion: ${scope_expansion:-<not found>}"
     echo ""
+    if [[ ${#placeholders[@]} -gt 0 ]]; then
+      echo "## Placeholders Detected"
+      echo ""
+      for p in "${placeholders[@]}"; do
+        echo "- $p: PLACEHOLDER"
+      done
+    fi
+    echo ""
     echo "Gate Status: $gate_status"
     echo ""
     if [[ ${#fail_reasons[@]} -gt 0 ]]; then
@@ -622,6 +761,13 @@ cmd_consensus() {
 
   echo "Written: $report_file"
   echo "Gate Status: $gate_status"
+  if [[ ${#fail_reasons[@]} -gt 0 ]]; then
+    echo ""
+    echo "Fail Reasons:"
+    for r in "${fail_reasons[@]}"; do
+      echo "  - $r"
+    done
+  fi
 }
 
 ###############################################################################
@@ -763,5 +909,5 @@ case "$COMMAND" in
   validate-final-consensus) cmd_validate_final_consensus "$@" ;;
   consensus)             cmd_consensus "$@" ;;
   finalize)              cmd_finalize "$@" ;;
-  *)                     die "Unknown command: $COMMAND. Run without arguments for usage." ;;
+  *)                     die_usage "Unknown command: '$COMMAND'." ;;
 esac
