@@ -1,0 +1,22 @@
+# Nested project repositories
+ace-lite/
+ai-boardroom/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
+
+暫存檔.json
+.claude/
