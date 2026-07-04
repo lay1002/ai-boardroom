@@ -1,5 +1,11 @@
 # Consensus Workflow
 
+## Development Principles Authority
+
+This document operates under `docs/development/development-principles.md`, the AI Workspace Development Constitution.
+
+Development Principles v2.0, the canonical Definition of Done, and the Sprint Retrospective / Product Owner Decision requirements are defined there as the single source of truth. This document does not redefine them; it defines the Review Bridge gate mechanics and artifact requirements below, which are unchanged by this reference.
+
 ## Purpose
 
 This document defines the only approved AI collaboration workflow for this workspace.

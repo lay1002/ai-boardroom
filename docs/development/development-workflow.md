@@ -6,6 +6,14 @@ Version: 1.0
 
 ---
 
+# 0. Development Principles Authority
+
+This document operates under `docs/development/development-principles.md`, the AI Workspace Development Constitution.
+
+Development Principles v2.0 and the canonical Definition of Done are defined there as the single source of truth. This document does not redefine them; it only describes the operational workflow steps and gates that implement them.
+
+---
+
 # 1. Purpose
 
 本文件定義 AI Decision Assistant V3 的標準開發流程。
@@ -17,6 +25,28 @@ Version: 1.0
 * 保持 Platform First 設計
 * 確保每個 Sprint 都能被驗證
 * 避免 AI 任意修改專案架構
+
+---
+
+# 1.1 Development Priority
+
+AI Workspace 的開發流程遵守：
+
+```text
+MVP First
+Architecture Second
+Platform Last
+```
+
+流程目的不是增加儀式，而是協助目前 Sprint 交付可驗證成果。
+
+原則：
+
+* 一次只做一件最重要的事情。
+* 優先完成目前 Sprint。
+* Architecture 必須支援 MVP，不得阻礙 MVP。
+* 只有在兩個以上功能需要共用、已有重複實作、能降低維護成本，且不延後 MVP 時，才新增 Framework、Platform 或抽象層。
+* 若 Product Owner 表示「先完成產品，再優化架構」，所有 AI Agent 必須優先協助完成產品。
 
 ---
 
@@ -495,13 +525,10 @@ Product Approval
 
 # 14. Definition of Done
 
-一個 Sprint 完成需符合：
+Definition of Done 由 `docs/development/development-principles.md`（AI Workspace Development Constitution）第 5 節定義為 AI Workspace 唯一標準，本文件不重複列出完整項目。
 
-* Product Owner Scope 確認
-* Claude Code 完成
-* Codex Review 通過
-* pytest 通過
-* E2E 通過（若有）
-* Commit Scope 正確
-* Known Limitation 已紀錄
-* Product Owner 同意進入下一個 Sprint
+本文件第 4 節 Standard Development Flow 與第 5 節 Manual Gate（Gate 1–4）描述的流程，對應滿足該 Definition of Done 的下列項目：Architecture Approved（Gate 1）、Implementation Review PASS（Gate 2）、End-to-End Validation PASS（Gate 3：pytest / E2E）、Git Review PASS（Gate 4）。
+
+Sprint Retrospective Completed、Product Owner Decision Recorded 為 Development Principles v2.0 新增的必要項目（見 `development-principles.md` 第 2 節 Principle 6），本文件描述的 Gate 流程完成後，仍必須額外完成 Sprint Retrospective 與 Product Owner Decision 紀錄，才符合完整 Definition of Done。
+
+完整定義請見 `docs/development/development-principles.md` 第 5、6 節。
