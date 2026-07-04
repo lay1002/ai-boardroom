@@ -350,6 +350,54 @@ blocking_artifacts() {
 }
 
 ###############################################################################
+# n8n Webhook Notification (optional, best-effort, non-blocking)
+###############################################################################
+
+# POST a JSON notification to N8N_CLAUDE_DONE_WEBHOOK_URL when claude_report.md
+# is confirmed READY by `check`. Purely a notification: it never calls Claude
+# or Codex, never modifies any file, and never affects the exit code of the
+# calling command. If the variable is unset, this is a no-op — existing
+# behavior is unchanged. If curl is missing or the request fails, only a
+# WARNING is printed; the caller's flow always continues.
+# See docs/development/n8n-claude-done-notification.md.
+notify_claude_report_done() {
+  local sprint_id="$1"
+  local round="$2"
+  local file_path="$3"
+
+  local webhook_url="${N8N_CLAUDE_DONE_WEBHOOK_URL:-}"
+  [[ -z "$webhook_url" ]] && return 0
+
+  if $DRY_RUN; then
+    echo "[dry-run] Would POST claude_report.md notification to N8N_CLAUDE_DONE_WEBHOOK_URL"
+    return 0
+  fi
+
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "WARNING: N8N_CLAUDE_DONE_WEBHOOK_URL is set but 'curl' is not installed; skipping notification." >&2
+    return 0
+  fi
+
+  # sprint_id and round-<round> are already validated as safe kebab-case /
+  # numeric by validate_id / validate_round, so only file_path needs light
+  # JSON-string escaping.
+  local escaped_path="${file_path//\\/\\\\}"
+  escaped_path="${escaped_path//\"/\\\"}"
+
+  local payload
+  payload="$(printf '{"sprint_id":"%s","round_id":"round-%s","file_path":"%s"}' \
+    "$sprint_id" "$round" "$escaped_path")"
+
+  if ! curl -fsS --max-time 5 -X POST "$webhook_url" \
+        -H "Content-Type: application/json" \
+        -d "$payload" >/dev/null 2>&1; then
+    echo "WARNING: Failed to POST claude_report.md notification to N8N webhook. Continuing without notification." >&2
+  fi
+
+  return 0
+}
+
+###############################################################################
 # Command: check
 ###############################################################################
 
@@ -427,6 +475,17 @@ cmd_check() {
     local fp="$round_dir/$f"
     if [[ -f "$fp" ]] && is_placeholder "$fp"; then
       blocking_placeholder+=("$f")
+    fi
+  done
+
+  # Optional, best-effort n8n notification: fires only when claude_report.md
+  # itself is READY (present and not a placeholder), independent of the
+  # overall gate status of the other artifacts. No-op unless
+  # N8N_CLAUDE_DONE_WEBHOOK_URL is set. See notify_claude_report_done above.
+  for f in "${ready[@]}"; do
+    if [[ "$f" == "claude_report.md" ]]; then
+      notify_claude_report_done "$sprint_id" "$round" "$round_dir/claude_report.md"
+      break
     fi
   done
 

@@ -310,6 +310,51 @@ assert_exit_code "check fails when codex_prompt.md is missing" 1 "$ec"
 assert_contains "check reports codex_prompt.md as MISSING" "codex_prompt.md: MISSING" "$output"
 
 ###############################################################################
+# Test 18: n8n webhook notification (optional, best-effort, non-blocking)
+###############################################################################
+echo ""
+echo "=== Test 18: n8n webhook notification ==="
+rm -rf "$TEST_DIR/test-webhook"
+cd "$SCRIPT_DIR" && REVIEWS_OVERRIDE="$TEST_DIR" bash "$BRIDGE" init test-webhook 001 2>&1
+cd "$SCRIPT_DIR" && REVIEWS_OVERRIDE="$TEST_DIR" bash "$BRIDGE" skeleton test-webhook 001 --type implementation 2>&1
+for f in architecture.md claude_report.md codex_prompt.md codex_review.md claude_reply.md codex_final_review.md; do
+  echo "# Real content for $f" > "$TEST_DIR/test-webhook/round-001/$f"
+done
+
+# 18a: env var unset -> behavior identical to before this feature existed.
+output=$(cd "$SCRIPT_DIR" && env -u N8N_CLAUDE_DONE_WEBHOOK_URL REVIEWS_OVERRIDE="$TEST_DIR" bash "$BRIDGE" check test-webhook 001 2>&1)
+ec=$?
+assert_exit_code "check exits 0 without webhook env var" 0 "$ec"
+assert_contains "check still reports PASS without webhook env var" "PASS:" "$output"
+if [[ "$output" != *"N8N_CLAUDE_DONE_WEBHOOK_URL"* && "$output" != *"WARNING"* ]]; then
+  echo "  PASS: no webhook attempt/warning when env var unset"
+  ((pass_count++))
+else
+  echo "  FAIL: unexpected webhook mention when env var unset"
+  ((fail_count++))
+fi
+
+# 18b: env var set to an unreachable URL -> curl fails, only a WARNING is
+# printed, exit code and PASS status are unaffected.
+output=$(cd "$SCRIPT_DIR" && REVIEWS_OVERRIDE="$TEST_DIR" N8N_CLAUDE_DONE_WEBHOOK_URL="http://127.0.0.1:1/webhook" bash "$BRIDGE" check test-webhook 001 2>&1)
+ec=$?
+assert_exit_code "check still exits 0 when webhook POST fails" 0 "$ec"
+assert_contains "check still reports PASS when webhook POST fails" "PASS:" "$output"
+assert_contains "check prints WARNING when webhook POST fails" "WARNING: Failed to POST claude_report.md notification" "$output"
+
+# 18c: --dry-run with webhook set -> shows a dry-run message and does not
+# attempt any real POST (no WARNING, since curl is never invoked).
+output=$(cd "$SCRIPT_DIR" && REVIEWS_OVERRIDE="$TEST_DIR" N8N_CLAUDE_DONE_WEBHOOK_URL="http://127.0.0.1:1/webhook" bash "$BRIDGE" check test-webhook 001 --dry-run 2>&1)
+assert_contains "dry-run shows would-POST message" "[dry-run] Would POST claude_report.md notification" "$output"
+if [[ "$output" != *"WARNING: Failed to POST"* ]]; then
+  echo "  PASS: dry-run does not attempt actual POST"
+  ((pass_count++))
+else
+  echo "  FAIL: dry-run unexpectedly attempted POST"
+  ((fail_count++))
+fi
+
+###############################################################################
 # Sprint-004 E2E compatibility
 ###############################################################################
 echo ""

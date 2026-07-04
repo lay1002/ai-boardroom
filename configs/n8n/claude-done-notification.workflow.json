@@ -1,0 +1,55 @@
+{
+  "name": "Workflow 1 - Claude 完成通知 (DRAFT - DO NOT ACTIVATE)",
+  "active": false,
+  "nodes": [
+    {
+      "id": "webhook-trigger-1",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [460, 300],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "claude-report-done",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "notes": "改用 Webhook 取代 Execute Command，因 n8n 2.25.7 預設停用 Execute Command 節點（安全考量），伺服器端未重新啟用。此節點只被動接收外部 POST 事件，不主動存取檔案系統、不執行任何 shell 指令。事件由外部（Product Owner 手動，或 Claude Code 完成報告後）以 curl 呼叫觸發，n8n 本身不主動偵測、不主動決策。"
+    },
+    {
+      "id": "telegram-send-message-1",
+      "name": "Telegram Send Message",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [680, 300],
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "REPLACE_WITH_PRODUCT_OWNER_CHAT_ID",
+        "text": "Claude Code 已完成 Implementation Report。\n\nSprint:\n{{$json.body.sprint_id}}\n\nRound:\n{{$json.body.round_id}}\n\n檔案:\n{{$json.body.file_path}}\n\n請 Product Owner 手動執行 Codex Review。\n\nManual Gate Reminder:\nn8n 只通知，不自動執行 Codex。",
+        "additionalFields": {}
+      },
+      "credentials": {},
+      "notes": "尚未設定 Telegram credential，也尚未填入真實 chatId，匯入後需由 Product Owner 手動設定。此節點只發送文字通知，不觸發任何後續動作，不呼叫 Claude 或 Codex。"
+    }
+  ],
+  "connections": {
+    "Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "Telegram Send Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "description": "DRAFT import file. Not deployed, not activated, no credentials attached. Uses Webhook Trigger instead of Execute Command because n8n 2.25.7 disables Execute Command by default for security reasons. See docs/development/n8n-claude-done-notification.md for full design notes, curl invocation example, and manual setup steps."
+  }
+}
