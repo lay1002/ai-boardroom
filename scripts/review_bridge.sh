@@ -353,12 +353,44 @@ blocking_artifacts() {
 # n8n Webhook Notification (optional, best-effort, non-blocking)
 ###############################################################################
 
+# Shared best-effort POST used by every n8n notification hook below. Given an
+# already-resolved webhook URL and JSON payload, sends one POST with a 5s
+# timeout. Never affects the caller's exit code: dry-run prints what would be
+# sent instead of sending; a missing curl binary or a failed request only
+# produce a WARNING on stderr (never the URL itself, to avoid leaking it into
+# logs). `label` identifies the notification in log messages (e.g.
+# "claude_report.md", "codex_review"). `env_var_name` is only used in the
+# dry-run / missing-curl messages (the variable name, not its value).
+_post_n8n_notification() {
+  local webhook_url="$1"
+  local payload="$2"
+  local label="$3"
+  local env_var_name="$4"
+
+  if $DRY_RUN; then
+    echo "[dry-run] Would POST $label notification to $env_var_name"
+    return 0
+  fi
+
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "WARNING: $env_var_name is set but 'curl' is not installed; skipping notification." >&2
+    return 0
+  fi
+
+  if ! curl -fsS --max-time 5 -X POST "$webhook_url" \
+        -H "Content-Type: application/json" \
+        -d "$payload" >/dev/null 2>&1; then
+    echo "WARNING: Failed to POST $label notification to N8N webhook. Continuing without notification." >&2
+  fi
+
+  return 0
+}
+
 # POST a JSON notification to N8N_CLAUDE_DONE_WEBHOOK_URL when claude_report.md
 # is confirmed READY by `check`. Purely a notification: it never calls Claude
 # or Codex, never modifies any file, and never affects the exit code of the
 # calling command. If the variable is unset, this is a no-op — existing
-# behavior is unchanged. If curl is missing or the request fails, only a
-# WARNING is printed; the caller's flow always continues.
+# behavior is unchanged.
 # See docs/development/n8n-claude-done-notification.md.
 notify_claude_report_done() {
   local sprint_id="$1"
@@ -367,16 +399,6 @@ notify_claude_report_done() {
 
   local webhook_url="${N8N_CLAUDE_DONE_WEBHOOK_URL:-}"
   [[ -z "$webhook_url" ]] && return 0
-
-  if $DRY_RUN; then
-    echo "[dry-run] Would POST claude_report.md notification to N8N_CLAUDE_DONE_WEBHOOK_URL"
-    return 0
-  fi
-
-  if ! command -v curl >/dev/null 2>&1; then
-    echo "WARNING: N8N_CLAUDE_DONE_WEBHOOK_URL is set but 'curl' is not installed; skipping notification." >&2
-    return 0
-  fi
 
   # sprint_id and round-<round> are already validated as safe kebab-case /
   # numeric by validate_id / validate_round, so only file_path needs light
@@ -388,13 +410,33 @@ notify_claude_report_done() {
   payload="$(printf '{"sprint_id":"%s","round_id":"round-%s","file_path":"%s"}' \
     "$sprint_id" "$round" "$escaped_path")"
 
-  if ! curl -fsS --max-time 5 -X POST "$webhook_url" \
-        -H "Content-Type: application/json" \
-        -d "$payload" >/dev/null 2>&1; then
-    echo "WARNING: Failed to POST claude_report.md notification to N8N webhook. Continuing without notification." >&2
-  fi
+  _post_n8n_notification "$webhook_url" "$payload" "claude_report.md" "N8N_CLAUDE_DONE_WEBHOOK_URL"
+}
 
-  return 0
+# POST a JSON notification to N8N_CODEX_REVIEW_DONE_WEBHOOK_URL when
+# codex_review.md or codex_final_review.md is confirmed READY by `check`.
+# Same opt-in / best-effort / non-blocking guarantees as
+# notify_claude_report_done above — it never calls Claude or Codex, never
+# modifies any file, and never affects the exit code of the calling command.
+# `review_type` must be "codex_review" or "codex_final_review".
+# See docs/development/n8n-codex-review-done-notification.md.
+notify_codex_review_done() {
+  local sprint_id="$1"
+  local round="$2"
+  local review_type="$3"
+  local file_path="$4"
+
+  local webhook_url="${N8N_CODEX_REVIEW_DONE_WEBHOOK_URL:-}"
+  [[ -z "$webhook_url" ]] && return 0
+
+  local escaped_path="${file_path//\\/\\\\}"
+  escaped_path="${escaped_path//\"/\\\"}"
+
+  local payload
+  payload="$(printf '{"sprint_id":"%s","round_id":"round-%s","review_type":"%s","file_path":"%s"}' \
+    "$sprint_id" "$round" "$review_type" "$escaped_path")"
+
+  _post_n8n_notification "$webhook_url" "$payload" "$review_type" "N8N_CODEX_REVIEW_DONE_WEBHOOK_URL"
 }
 
 ###############################################################################
@@ -478,15 +520,24 @@ cmd_check() {
     fi
   done
 
-  # Optional, best-effort n8n notification: fires only when claude_report.md
-  # itself is READY (present and not a placeholder), independent of the
-  # overall gate status of the other artifacts. No-op unless
-  # N8N_CLAUDE_DONE_WEBHOOK_URL is set. See notify_claude_report_done above.
+  # Optional, best-effort n8n notifications: reuse the ready[] classification
+  # already computed above — no new READY detection, no extra file scan, no
+  # extra markdown parsing is introduced here. Each case fires independently
+  # of the overall gate status of the other artifacts, and each is a no-op
+  # unless its corresponding N8N_*_WEBHOOK_URL is set. See
+  # notify_claude_report_done / notify_codex_review_done above.
   for f in "${ready[@]}"; do
-    if [[ "$f" == "claude_report.md" ]]; then
-      notify_claude_report_done "$sprint_id" "$round" "$round_dir/claude_report.md"
-      break
-    fi
+    case "$f" in
+      claude_report.md)
+        notify_claude_report_done "$sprint_id" "$round" "$round_dir/claude_report.md"
+        ;;
+      codex_review.md)
+        notify_codex_review_done "$sprint_id" "$round" "codex_review" "$round_dir/codex_review.md"
+        ;;
+      codex_final_review.md)
+        notify_codex_review_done "$sprint_id" "$round" "codex_final_review" "$round_dir/codex_final_review.md"
+        ;;
+    esac
   done
 
   # Print per-file status

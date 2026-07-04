@@ -355,6 +355,74 @@ else
 fi
 
 ###############################################################################
+# Test 19: n8n codex review webhook notification (optional, best-effort)
+###############################################################################
+echo ""
+echo "=== Test 19: n8n codex review webhook notification ==="
+rm -rf "$TEST_DIR/test-codex-webhook"
+cd "$SCRIPT_DIR" && REVIEWS_OVERRIDE="$TEST_DIR" bash "$BRIDGE" init test-codex-webhook 001 2>&1
+cd "$SCRIPT_DIR" && REVIEWS_OVERRIDE="$TEST_DIR" bash "$BRIDGE" skeleton test-codex-webhook 001 --type implementation 2>&1
+for f in architecture.md claude_report.md codex_prompt.md codex_review.md claude_reply.md codex_final_review.md; do
+  echo "# Real content for $f" > "$TEST_DIR/test-codex-webhook/round-001/$f"
+done
+
+# 19a: env var unset -> behavior identical to before this feature existed.
+output=$(cd "$SCRIPT_DIR" && env -u N8N_CODEX_REVIEW_DONE_WEBHOOK_URL REVIEWS_OVERRIDE="$TEST_DIR" bash "$BRIDGE" check test-codex-webhook 001 2>&1)
+ec=$?
+assert_exit_code "check exits 0 without codex webhook env var" 0 "$ec"
+assert_contains "check still reports PASS without codex webhook env var" "PASS:" "$output"
+if [[ "$output" != *"N8N_CODEX_REVIEW_DONE_WEBHOOK_URL"* && "$output" != *"WARNING"* ]]; then
+  echo "  PASS: no codex webhook attempt/warning when env var unset"
+  ((pass_count++))
+else
+  echo "  FAIL: unexpected codex webhook mention when env var unset"
+  ((fail_count++))
+fi
+
+# 19b: env var set to an unreachable URL -> both codex_review.md and
+# codex_final_review.md are READY, so both notifications are attempted and
+# both fail -> two WARNINGs, exit code and PASS status unaffected, and the
+# webhook URL itself is never printed.
+output=$(cd "$SCRIPT_DIR" && REVIEWS_OVERRIDE="$TEST_DIR" N8N_CODEX_REVIEW_DONE_WEBHOOK_URL="http://127.0.0.1:1/webhook" bash "$BRIDGE" check test-codex-webhook 001 2>&1)
+ec=$?
+assert_exit_code "check still exits 0 when codex webhook POST fails" 0 "$ec"
+assert_contains "check still reports PASS when codex webhook POST fails" "PASS:" "$output"
+assert_contains "check warns for codex_review failure" "WARNING: Failed to POST codex_review notification to N8N webhook" "$output"
+assert_contains "check warns for codex_final_review failure" "WARNING: Failed to POST codex_final_review notification to N8N webhook" "$output"
+if [[ "$output" != *"127.0.0.1:1"* ]]; then
+  echo "  PASS: warning does not leak the webhook URL"
+  ((pass_count++))
+else
+  echo "  FAIL: warning leaked the webhook URL"
+  ((fail_count++))
+fi
+
+# 19c: --dry-run with codex webhook set -> shows would-POST messages for both
+# review_type values, no real POST attempted.
+output=$(cd "$SCRIPT_DIR" && REVIEWS_OVERRIDE="$TEST_DIR" N8N_CODEX_REVIEW_DONE_WEBHOOK_URL="http://127.0.0.1:1/webhook" bash "$BRIDGE" check test-codex-webhook 001 --dry-run 2>&1)
+assert_contains "dry-run shows would-POST for codex_review" "[dry-run] Would POST codex_review notification" "$output"
+assert_contains "dry-run shows would-POST for codex_final_review" "[dry-run] Would POST codex_final_review notification" "$output"
+if [[ "$output" != *"WARNING: Failed to POST"* ]]; then
+  echo "  PASS: dry-run does not attempt actual codex webhook POST"
+  ((pass_count++))
+else
+  echo "  FAIL: dry-run unexpectedly attempted codex webhook POST"
+  ((fail_count++))
+fi
+
+# 19d: the two webhook env vars are independent — setting only
+# N8N_CLAUDE_DONE_WEBHOOK_URL must not trigger any codex review notification.
+output=$(cd "$SCRIPT_DIR" && env -u N8N_CODEX_REVIEW_DONE_WEBHOOK_URL REVIEWS_OVERRIDE="$TEST_DIR" N8N_CLAUDE_DONE_WEBHOOK_URL="http://127.0.0.1:1/webhook" bash "$BRIDGE" check test-codex-webhook 001 2>&1)
+assert_contains "only claude_report.md warning appears when only claude webhook is set" "WARNING: Failed to POST claude_report.md notification" "$output"
+if [[ "$output" != *"codex_review notification"* && "$output" != *"codex_final_review notification"* ]]; then
+  echo "  PASS: codex webhook not triggered when only claude webhook env var is set"
+  ((pass_count++))
+else
+  echo "  FAIL: codex webhook unexpectedly triggered"
+  ((fail_count++))
+fi
+
+###############################################################################
 # Sprint-004 E2E compatibility
 ###############################################################################
 echo ""
