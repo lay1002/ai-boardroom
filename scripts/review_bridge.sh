@@ -386,16 +386,37 @@ _post_n8n_notification() {
   return 0
 }
 
+# Escape a string for embedding as one JSON string value: backslash and
+# double-quote first, then convert literal newline/CR/tab characters to their
+# JSON escape sequences. Used for multi-line file content (handoff_package.md)
+# where the lighter path-only escaping below is not sufficient.
+_json_escape_multiline() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//$'\r'/}"
+  s="${s//$'\t'/\\t}"
+  s="${s//$'\n'/\\n}"
+  echo "$s"
+}
+
 # POST a JSON notification to N8N_CLAUDE_DONE_WEBHOOK_URL when claude_report.md
 # is confirmed READY by `check`. Purely a notification: it never calls Claude
 # or Codex, never modifies any file, and never affects the exit code of the
 # calling command. If the variable is unset, this is a no-op — existing
 # behavior is unchanged.
+#
+# `handoff_file` (optional, Sprint-010) is the path to the handoff_package.md
+# written for this same gate, if any. When present, its full content is
+# embedded as `handoff_package_content` so a remote n8n instance — which has
+# no filesystem access to this repo — can push the Copyable Prompt straight
+# into the Telegram message instead of only a path it cannot read.
 # See docs/development/n8n-claude-done-notification.md.
 notify_claude_report_done() {
   local sprint_id="$1"
   local round="$2"
   local file_path="$3"
+  local handoff_file="${4:-}"
 
   local webhook_url="${N8N_CLAUDE_DONE_WEBHOOK_URL:-}"
   [[ -z "$webhook_url" ]] && return 0
@@ -407,8 +428,15 @@ notify_claude_report_done() {
   escaped_path="${escaped_path//\"/\\\"}"
 
   local payload
-  payload="$(printf '{"sprint_id":"%s","round_id":"round-%s","file_path":"%s"}' \
-    "$sprint_id" "$round" "$escaped_path")"
+  if [[ -n "$handoff_file" && -f "$handoff_file" ]]; then
+    local escaped_handoff
+    escaped_handoff="$(_json_escape_multiline "$(cat "$handoff_file")")"
+    payload="$(printf '{"sprint_id":"%s","round_id":"round-%s","file_path":"%s","handoff_package_content":"%s"}' \
+      "$sprint_id" "$round" "$escaped_path" "$escaped_handoff")"
+  else
+    payload="$(printf '{"sprint_id":"%s","round_id":"round-%s","file_path":"%s"}' \
+      "$sprint_id" "$round" "$escaped_path")"
+  fi
 
   _post_n8n_notification "$webhook_url" "$payload" "claude_report.md" "N8N_CLAUDE_DONE_WEBHOOK_URL"
 }
@@ -419,12 +447,20 @@ notify_claude_report_done() {
 # notify_claude_report_done above — it never calls Claude or Codex, never
 # modifies any file, and never affects the exit code of the calling command.
 # `review_type` must be "codex_review" or "codex_final_review".
+#
+# `handoff_file` (optional, Sprint-010) works exactly as in
+# notify_claude_report_done above: when the caller passes the
+# handoff_package.md written for this gate, its content is embedded as
+# `handoff_package_content`. codex_final_review.md has no Handoff Package
+# scenario defined in the Architecture, so its caller passes no handoff_file
+# and the field is simply omitted — no fabricated or stale content is sent.
 # See docs/development/n8n-codex-review-done-notification.md.
 notify_codex_review_done() {
   local sprint_id="$1"
   local round="$2"
   local review_type="$3"
   local file_path="$4"
+  local handoff_file="${5:-}"
 
   local webhook_url="${N8N_CODEX_REVIEW_DONE_WEBHOOK_URL:-}"
   [[ -z "$webhook_url" ]] && return 0
@@ -433,8 +469,15 @@ notify_codex_review_done() {
   escaped_path="${escaped_path//\"/\\\"}"
 
   local payload
-  payload="$(printf '{"sprint_id":"%s","round_id":"round-%s","review_type":"%s","file_path":"%s"}' \
-    "$sprint_id" "$round" "$review_type" "$escaped_path")"
+  if [[ -n "$handoff_file" && -f "$handoff_file" ]]; then
+    local escaped_handoff
+    escaped_handoff="$(_json_escape_multiline "$(cat "$handoff_file")")"
+    payload="$(printf '{"sprint_id":"%s","round_id":"round-%s","review_type":"%s","file_path":"%s","handoff_package_content":"%s"}' \
+      "$sprint_id" "$round" "$review_type" "$escaped_path" "$escaped_handoff")"
+  else
+    payload="$(printf '{"sprint_id":"%s","round_id":"round-%s","review_type":"%s","file_path":"%s"}' \
+      "$sprint_id" "$round" "$review_type" "$escaped_path")"
+  fi
 
   _post_n8n_notification "$webhook_url" "$payload" "$review_type" "N8N_CODEX_REVIEW_DONE_WEBHOOK_URL"
 }
@@ -772,19 +815,24 @@ cmd_check() {
   # other artifacts. Notifications are a no-op unless the corresponding
   # N8N_*_WEBHOOK_URL is set; Handoff Package generation always runs when its
   # gate condition is met (Review Bridge is the sole Handoff Package
-  # producer, per Sprint-010 Architecture section 5.1). See
-  # notify_claude_report_done / notify_codex_review_done /
-  # write_handoff_package_claude_to_codex / write_handoff_package_codex_to_claude
-  # above.
+  # producer, per Sprint-010 Architecture section 5.1).
+  #
+  # Handoff Package generation runs BEFORE its gate's notification so the
+  # freshly written handoff_package.md can be attached to that same
+  # notification's payload (see notify_claude_report_done /
+  # notify_codex_review_done "handoff_file" parameter above). codex_final_review.md
+  # has no Handoff Package scenario in the Architecture, so its notification
+  # is sent with no handoff_file — no stale or fabricated content attached.
+  local handoff_file="$round_dir/handoff_package.md"
   for f in "${ready[@]}"; do
     case "$f" in
       claude_report.md)
-        notify_claude_report_done "$sprint_id" "$round" "$round_dir/claude_report.md"
         write_handoff_package_claude_to_codex "$sprint_id" "$round" "$round_dir" "$arch_file" "${ready[@]}"
+        notify_claude_report_done "$sprint_id" "$round" "$round_dir/claude_report.md" "$handoff_file"
         ;;
       codex_review.md)
-        notify_codex_review_done "$sprint_id" "$round" "codex_review" "$round_dir/codex_review.md"
         write_handoff_package_codex_to_claude "$sprint_id" "$round" "$round_dir" "$arch_file" "${ready[@]}"
+        notify_codex_review_done "$sprint_id" "$round" "codex_review" "$round_dir/codex_review.md" "$handoff_file"
         ;;
       codex_final_review.md)
         notify_codex_review_done "$sprint_id" "$round" "codex_final_review" "$round_dir/codex_final_review.md"

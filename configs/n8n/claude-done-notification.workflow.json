@@ -26,11 +26,13 @@
         "resource": "message",
         "operation": "sendMessage",
         "chatId": "REPLACE_WITH_PRODUCT_OWNER_CHAT_ID",
-        "text": "Claude Code 已完成 Implementation Report。\n\nSprint:\n{{$json.body.sprint_id}}\n\nRound:\n{{$json.body.round_id}}\n\n檔案:\n{{$json.body.file_path}}\n\n請 Product Owner 手動執行 Codex Review。\n\nManual Gate Reminder:\nn8n 只通知，不自動執行 Codex。",
-        "additionalFields": {}
+        "text": "=Claude Code 已完成 Implementation Report。\n\nSprint:\n{{$json.body.sprint_id}}\n\nRound:\n{{$json.body.round_id}}\n\n檔案:\n{{$json.body.file_path}}\n\n請 Product Owner 手動執行 Codex Review。\n\nManual Gate Reminder:\nn8n 只通知，不自動執行 Codex。\n\n---\nHandoff Package（可直接複製給 Codex）:\n\n{{$json.body.handoff_package_content || '(本次通知未附帶 Handoff Package)'}}",
+        "additionalFields": {
+          "parse_mode": "none"
+        }
       },
       "credentials": {},
-      "notes": "尚未設定 Telegram credential，也尚未填入真實 chatId，匯入後需由 Product Owner 手動設定。此節點只發送文字通知，不觸發任何後續動作，不呼叫 Claude 或 Codex。"
+      "notes": "尚未設定 Telegram credential，也尚未填入真實 chatId，匯入後需由 Product Owner 手動設定。此節點只發送文字通知，不觸發任何後續動作，不呼叫 Claude 或 Codex。handoff_package_content 欄位由 review_bridge.sh 讀取 handoff_package.md 內容後附在 webhook payload 裡送來（因為 n8n 是遠端服務，無法直接讀取本機檔案系統），此節點只是原樣顯示，不做任何解析或決策。parse_mode 明確設為 none，避免 handoff_package_content 裡的檔名底線（例如 claude_report.md）被 Telegram Markdown/MarkdownV2 解析成斜體語法而吃掉。"
     }
   ],
   "connections": {

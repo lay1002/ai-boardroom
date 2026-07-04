@@ -502,6 +502,113 @@ doc_handoff=$(cat "$TEST_DIR/test-handoff-doc/round-001/handoff_package.md" 2>/d
 assert_contains "documentation sprint handoff references reviewed_document.md" "reviews/test-handoff-doc/round-001/reviewed_document.md" "$doc_handoff"
 
 ###############################################################################
+# Test 21: Handoff Package content attached to Telegram webhook payload
+# (Sprint-010 Telegram wiring)
+###############################################################################
+echo ""
+echo "=== Test 21: Handoff Package attached to webhook payload ==="
+
+# Fake curl stub: captures the JSON payload passed via -d into a file
+# (via the CAPTURED_PAYLOAD_FILE env var) and always succeeds. Used only to
+# inspect payload content precisely, with no real network access.
+FAKE_BIN_DIR="$TEST_DIR/fake-bin-handoff"
+mkdir -p "$FAKE_BIN_DIR"
+cat > "$FAKE_BIN_DIR/curl" <<'STUB'
+#!/usr/bin/env bash
+for ((i=1; i<=$#; i++)); do
+  if [[ "${!i}" == "-d" ]]; then
+    j=$((i+1))
+    echo "${!j}" > "$CAPTURED_PAYLOAD_FILE"
+  fi
+done
+exit 0
+STUB
+chmod +x "$FAKE_BIN_DIR/curl"
+CAPTURED_PAYLOAD_FILE="$TEST_DIR/captured-handoff-payload.json"
+
+# 21a: claude_report.md READY -> its notification payload includes
+# handoff_package_content, is valid JSON, and decodes back to the Copyable
+# Prompt targeting Codex.
+rm -rf "$TEST_DIR/test-handoff-wire-a"
+cd "$SCRIPT_DIR" && REVIEWS_OVERRIDE="$TEST_DIR" bash "$BRIDGE" init test-handoff-wire-a 001 2>&1
+cd "$SCRIPT_DIR" && REVIEWS_OVERRIDE="$TEST_DIR" bash "$BRIDGE" skeleton test-handoff-wire-a 001 --type implementation 2>&1
+echo "# Real architecture" > "$TEST_DIR/test-handoff-wire-a/round-001/architecture.md"
+echo "# Real claude report" > "$TEST_DIR/test-handoff-wire-a/round-001/claude_report.md"
+rm -f "$CAPTURED_PAYLOAD_FILE"
+(cd "$SCRIPT_DIR" && PATH="$FAKE_BIN_DIR:$PATH" CAPTURED_PAYLOAD_FILE="$CAPTURED_PAYLOAD_FILE" \
+  REVIEWS_OVERRIDE="$TEST_DIR" N8N_CLAUDE_DONE_WEBHOOK_URL="http://n8n.invalid/webhook" \
+  bash "$BRIDGE" check test-handoff-wire-a 001 >/dev/null 2>&1)
+if [[ -f "$CAPTURED_PAYLOAD_FILE" ]]; then
+  payload=$(cat "$CAPTURED_PAYLOAD_FILE")
+  assert_contains "claude_report.md payload includes handoff_package_content" "handoff_package_content" "$payload"
+  if python3 -c "import json; json.load(open('$CAPTURED_PAYLOAD_FILE'))" 2>/dev/null; then
+    echo "  PASS: captured payload is valid JSON"
+    ((pass_count++))
+  else
+    echo "  FAIL: captured payload is not valid JSON"
+    ((fail_count++))
+  fi
+  decoded=$(python3 -c "import json; d=json.load(open('$CAPTURED_PAYLOAD_FILE')); print(d.get('handoff_package_content',''))" 2>/dev/null)
+  assert_contains "decoded handoff_package_content contains Copyable Prompt section" "Copyable Prompt" "$decoded"
+  assert_contains "decoded handoff_package_content targets Codex" "Codex" "$decoded"
+else
+  echo "  FAIL: no payload captured for claude_report.md notification"
+  ((fail_count++))
+fi
+
+# 21b: codex_review.md READY -> its notification payload includes
+# handoff_package_content targeting Claude Code (only N8N_CODEX_REVIEW_DONE_WEBHOOK_URL
+# is set, so only the codex_review.md case fires — codex_final_review.md is
+# still a placeholder here).
+rm -rf "$TEST_DIR/test-handoff-wire-b"
+cd "$SCRIPT_DIR" && REVIEWS_OVERRIDE="$TEST_DIR" bash "$BRIDGE" init test-handoff-wire-b 001 2>&1
+cd "$SCRIPT_DIR" && REVIEWS_OVERRIDE="$TEST_DIR" bash "$BRIDGE" skeleton test-handoff-wire-b 001 --type implementation 2>&1
+echo "# Real architecture" > "$TEST_DIR/test-handoff-wire-b/round-001/architecture.md"
+echo "# Real claude report" > "$TEST_DIR/test-handoff-wire-b/round-001/claude_report.md"
+echo "# Real codex review" > "$TEST_DIR/test-handoff-wire-b/round-001/codex_review.md"
+rm -f "$CAPTURED_PAYLOAD_FILE"
+(cd "$SCRIPT_DIR" && PATH="$FAKE_BIN_DIR:$PATH" CAPTURED_PAYLOAD_FILE="$CAPTURED_PAYLOAD_FILE" \
+  REVIEWS_OVERRIDE="$TEST_DIR" N8N_CODEX_REVIEW_DONE_WEBHOOK_URL="http://n8n.invalid/webhook" \
+  bash "$BRIDGE" check test-handoff-wire-b 001 >/dev/null 2>&1)
+if [[ -f "$CAPTURED_PAYLOAD_FILE" ]]; then
+  decoded=$(python3 -c "import json; d=json.load(open('$CAPTURED_PAYLOAD_FILE')); print(d.get('handoff_package_content',''))" 2>/dev/null)
+  assert_contains "codex_review.md handoff_package_content targets Claude Code" "Claude Code" "$decoded"
+  assert_contains "codex_review.md handoff_package_content has Copyable Prompt" "Copyable Prompt" "$decoded"
+else
+  echo "  FAIL: no payload captured for codex_review.md notification"
+  ((fail_count++))
+fi
+
+# 21c: codex_final_review.md READY -> no Handoff Package scenario is defined
+# for this gate, so its notification must NOT include handoff_package_content
+# (isolated in its own sprint dir: only codex_final_review.md is READY among
+# the codex-review-related files).
+rm -rf "$TEST_DIR/test-handoff-wire-c"
+cd "$SCRIPT_DIR" && REVIEWS_OVERRIDE="$TEST_DIR" bash "$BRIDGE" init test-handoff-wire-c 001 2>&1
+cd "$SCRIPT_DIR" && REVIEWS_OVERRIDE="$TEST_DIR" bash "$BRIDGE" skeleton test-handoff-wire-c 001 --type implementation 2>&1
+echo "# Real architecture" > "$TEST_DIR/test-handoff-wire-c/round-001/architecture.md"
+echo "# Real claude report" > "$TEST_DIR/test-handoff-wire-c/round-001/claude_report.md"
+echo "# Real codex final review" > "$TEST_DIR/test-handoff-wire-c/round-001/codex_final_review.md"
+rm -f "$CAPTURED_PAYLOAD_FILE"
+(cd "$SCRIPT_DIR" && PATH="$FAKE_BIN_DIR:$PATH" CAPTURED_PAYLOAD_FILE="$CAPTURED_PAYLOAD_FILE" \
+  REVIEWS_OVERRIDE="$TEST_DIR" N8N_CODEX_REVIEW_DONE_WEBHOOK_URL="http://n8n.invalid/webhook" \
+  bash "$BRIDGE" check test-handoff-wire-c 001 >/dev/null 2>&1)
+if [[ -f "$CAPTURED_PAYLOAD_FILE" ]]; then
+  payload=$(cat "$CAPTURED_PAYLOAD_FILE")
+  assert_contains "codex_final_review.md payload has correct review_type" "codex_final_review" "$payload"
+  if [[ "$payload" != *"handoff_package_content"* ]]; then
+    echo "  PASS: codex_final_review.md notification omits handoff_package_content (no scenario defined)"
+    ((pass_count++))
+  else
+    echo "  FAIL: codex_final_review.md notification unexpectedly included handoff_package_content"
+    ((fail_count++))
+  fi
+else
+  echo "  FAIL: no payload captured for codex_final_review.md notification"
+  ((fail_count++))
+fi
+
+###############################################################################
 # Sprint-004 E2E compatibility
 ###############################################################################
 echo ""

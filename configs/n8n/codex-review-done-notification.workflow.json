@@ -26,11 +26,13 @@
         "resource": "message",
         "operation": "sendMessage",
         "chatId": "REPLACE_WITH_PRODUCT_OWNER_CHAT_ID",
-        "text": "✅ Codex Review 已完成\n\nSprint: {{$json.body.sprint_id}}\nRound: {{$json.body.round_id}}\nType: {{$json.body.review_type}}\n\n請回到 workspace 查看：\n{{$json.body.file_path}}",
-        "additionalFields": {}
+        "text": "=✅ Codex Review 已完成\n\nSprint: {{$json.body.sprint_id}}\nRound: {{$json.body.round_id}}\nType: {{$json.body.review_type}}\n\n請回到 workspace 查看：\n{{$json.body.file_path}}\n\n---\nHandoff Package（可直接複製給下一位 AI）:\n\n{{$json.body.handoff_package_content || '(本次通知未附帶 Handoff Package，例如 codex_final_review 目前未定義 Handoff 場景)'}}",
+        "additionalFields": {
+          "parse_mode": "none"
+        }
       },
       "credentials": {},
-      "notes": "尚未設定 Telegram credential，也尚未填入真實 chatId，匯入後需由 Product Owner 手動設定。此節點只發送文字通知，不觸發任何後續動作，不呼叫 Claude 或 Codex，不自動產生 Consensus，不自動 Commit。"
+      "notes": "尚未設定 Telegram credential，也尚未填入真實 chatId，匯入後需由 Product Owner 手動設定。此節點只發送文字通知，不觸發任何後續動作，不呼叫 Claude 或 Codex，不自動產生 Consensus，不自動 Commit。handoff_package_content 只有在 review_type=codex_review 時才會有值（對應 Architecture 10.2 場景）；review_type=codex_final_review 時該欄位不存在，會顯示 fallback 文字，這是預期行為，不是缺失。parse_mode 明確設為 none，避免 handoff_package_content 裡的檔名底線（例如 codex_review.md）被 Telegram Markdown/MarkdownV2 解析成斜體語法而吃掉。"
     }
   ],
   "connections": {
