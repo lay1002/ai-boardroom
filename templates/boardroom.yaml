@@ -1,0 +1,52 @@
+template_id: boardroom
+name: Boardroom Decision Template
+version: 1.0.0
+status: active
+description: Multi-perspective structured decision analysis.
+
+input_schema:
+  type: decision-request-v1
+  required_fields:
+    - question
+
+workflow:
+  workflow_id: multi-perspective-decision-v1
+  mode: parallel-perspectives
+
+perspectives:
+  - perspective_id: ceo
+    required: true
+    order: 10
+  - perspective_id: cto
+    required: true
+    order: 20
+  - perspective_id: cfo
+    required: true
+    order: 30
+  - perspective_id: risk
+    required: true
+    order: 40
+  - perspective_id: execution
+    required: true
+    order: 50
+
+prompt_policy:
+  prompt_set_id: boardroom-default-prompts-v1
+
+provider_policy:
+  provider_policy_id: default-multi-model-policy-v1
+
+moderator:
+  strategy_id: synthesize-conflicts-v1
+
+consensus:
+  strategy_id: majority-with-risk-override-v1
+
+output_schema:
+  schema_id: structured-decision-v1
+
+metadata:
+  category: strategy
+  tags:
+    - boardroom
+    - decision
