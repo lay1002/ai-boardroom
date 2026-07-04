@@ -440,6 +440,245 @@ notify_codex_review_done() {
 }
 
 ###############################################################################
+# Handoff Package (Sprint-010, Architecture Baseline v1.0)
+###############################################################################
+#
+# Review Bridge is the sole producer of handoff_package.md. Content is
+# assembled purely from fixed templates and file path references already
+# known to `check` — no LLM call, no new READY detection, no extra file scan
+# or markdown parsing beyond what `check` already computed. Missing or
+# placeholder source files are rendered as an explicit PLACEHOLDER reference
+# rather than silently omitted or guessed at (Architecture section 8).
+
+# Membership test against an already-computed classification array (e.g.
+# ready[]). Reuses the classification `check` already computed for this
+# invocation; does not re-scan the filesystem.
+_array_contains() {
+  local needle="$1"
+  shift
+  local x
+  for x in "$@"; do
+    [[ "$x" == "$needle" ]] && return 0
+  done
+  return 1
+}
+
+# Render the reference line for one artifact: the real relative path if it is
+# in ready[], otherwise an explicit PLACEHOLDER line (never a silently wrong
+# or fabricated reference).
+# Usage: _handoff_ref <sprint_id> <round> <name> <ready...>
+_handoff_ref() {
+  local sprint_id="$1" round="$2" name="$3"
+  shift 3
+  local rel="reviews/$sprint_id/round-$round/$name"
+  if _array_contains "$name" "$@"; then
+    echo "$rel"
+  else
+    echo "PLACEHOLDER: $rel is not available (missing or placeholder)"
+  fi
+}
+
+# Write handoff_package.md for the "Claude Implementation Completed ->
+# Codex Review" gate (Architecture section 10.1). `arch_file` is
+# "architecture.md" for implementation Sprints or "reviewed_document.md" for
+# documentation Sprints, matching the Sprint Type already resolved by `check`.
+write_handoff_package_claude_to_codex() {
+  local sprint_id="$1" round="$2" round_dir="$3" arch_file="$4"
+  shift 4
+  local -a ready_arr=("$@")
+
+  if $DRY_RUN; then
+    echo "[dry-run] Would write $round_dir/handoff_package.md (Target AI: Codex)"
+    return 0
+  fi
+
+  local arch_ref claude_ref
+  arch_ref="$(_handoff_ref "$sprint_id" "$round" "$arch_file" "${ready_arr[@]}")"
+  claude_ref="$(_handoff_ref "$sprint_id" "$round" "claude_report.md" "${ready_arr[@]}")"
+
+  cat > "$round_dir/handoff_package.md" <<EOF
+# Handoff Package
+
+## 1. Target AI
+
+Codex
+
+## 2. Current Stage
+
+Claude Implementation Completed
+
+## 3. Objective
+
+依已核准的 Architecture，Review $sprint_id round-$round 的 Claude Code Implementation，並產出 codex_review.md。
+
+## 4. Required Reading
+
+- PROJECT_BOOTSTRAP.md
+- docs/development/consensus-workflow.md
+- scripts/review_bridge.sh
+- $arch_ref
+- $claude_ref
+
+## 5. Scope
+
+- 檢查實作是否符合已核准的 Architecture。
+- 檢查是否有 scope creep（範圍是否被自行擴大）。
+- 檢查測試是否足夠、是否通過。
+- 判斷是否有 Must Fix 或 Architecture Conflict。
+
+## 6. Out of Scope
+
+- 不新增 AI 自動互叫
+- 不新增 Workflow Engine
+- 不新增 Prompt Generator
+- 不新增 Queue / Database
+- 不改變 Manual Gate
+- 不改變既有角色分工
+- 不得修改程式碼（Codex 僅負責 Review）
+- 不得 commit
+
+## 7. Acceptance Criteria
+
+- 產出 reviews/$sprint_id/round-$round/codex_review.md
+- 明確標示 Gate Status、Must Fix、Architecture Conflict、Final Recommendation
+- 未修改任何程式碼、未 commit
+
+## 8. Copyable Prompt
+
+請閱讀：
+
+- PROJECT_BOOTSTRAP.md
+- docs/development/consensus-workflow.md
+- scripts/review_bridge.sh
+- $arch_ref
+- $claude_ref
+
+工作：
+
+為 $sprint_id round-$round 產生正式 Codex Review。
+
+請完成以下工作：
+
+1. 判斷是否符合 Architecture / Implementation Spec。
+2. 判斷是否有 scope creep。
+3. 判斷是否有 Architecture Conflict。
+4. 判斷是否有 Must Fix。
+5. 依 claude_report.md 描述的測試方式重新驗證測試。
+6. 輸出：
+   - Gate Status
+   - Must Fix
+   - Architecture Conflict
+   - Final Recommendation
+
+請覆寫：
+
+reviews/$sprint_id/round-$round/codex_review.md
+
+限制：
+
+- 不修改 source code。
+- 不 stage。
+- 不 commit。
+- 不 push。
+- 只允許更新 reviews/$sprint_id/round-$round/codex_review.md。
+EOF
+}
+
+# Write handoff_package.md for the "Codex Review Completed -> Claude fixes"
+# gate (Architecture section 10.2).
+write_handoff_package_codex_to_claude() {
+  local sprint_id="$1" round="$2" round_dir="$3" arch_file="$4"
+  shift 4
+  local -a ready_arr=("$@")
+
+  if $DRY_RUN; then
+    echo "[dry-run] Would write $round_dir/handoff_package.md (Target AI: Claude Code)"
+    return 0
+  fi
+
+  local arch_ref claude_ref codex_ref
+  arch_ref="$(_handoff_ref "$sprint_id" "$round" "$arch_file" "${ready_arr[@]}")"
+  claude_ref="$(_handoff_ref "$sprint_id" "$round" "claude_report.md" "${ready_arr[@]}")"
+  codex_ref="$(_handoff_ref "$sprint_id" "$round" "codex_review.md" "${ready_arr[@]}")"
+
+  cat > "$round_dir/handoff_package.md" <<EOF
+# Handoff Package
+
+## 1. Target AI
+
+Claude Code
+
+## 2. Current Stage
+
+Codex Review Completed
+
+## 3. Objective
+
+只修正 $sprint_id round-$round 的 codex_review.md 所指出的問題，不擴大 Scope。
+
+## 4. Required Reading
+
+- PROJECT_BOOTSTRAP.md
+- docs/development/consensus-workflow.md
+- scripts/review_bridge.sh
+- $arch_ref
+- $claude_ref
+- $codex_ref
+
+## 5. Scope
+
+- 依 codex_review.md 指出的 Must Fix / Architecture Conflict 項目進行修正。
+- 更新 claude_reply.md，逐項回應 codex_review.md 的意見。
+
+## 6. Out of Scope
+
+- 不新增 AI 自動互叫
+- 不新增 Workflow Engine
+- 不新增 Prompt Generator
+- 不新增 Queue / Database
+- 不改變 Manual Gate
+- 不改變既有角色分工
+- 不得修正 codex_review.md 未提及的項目
+- 不得擴大 Scope
+- 不得 commit
+
+## 7. Acceptance Criteria
+
+- 產出 reviews/$sprint_id/round-$round/claude_reply.md，逐項回應 codex_review.md 的 Must Fix / Architecture Conflict
+- 未擴大 Scope
+- 未 commit
+
+## 8. Copyable Prompt
+
+請閱讀：
+
+- PROJECT_BOOTSTRAP.md
+- docs/development/consensus-workflow.md
+- scripts/review_bridge.sh
+- $arch_ref
+- $claude_ref
+- $codex_ref
+
+工作：
+
+只修正 codex_review.md 指出的問題，不擴大範圍。
+
+請完成以下工作：
+
+1. 閱讀 codex_review.md 的 Must Fix 與 Architecture Conflict。
+2. 只針對這些項目進行修正或回應。
+3. 完成後更新 claude_reply.md，逐項回應。
+4. 回報測試方式與測試結果。
+
+限制：
+
+- 不擴大 Scope。
+- 不修改 codex_review.md 未提及的項目。
+- 不 commit。
+EOF
+}
+
+###############################################################################
 # Command: check
 ###############################################################################
 
@@ -520,19 +759,32 @@ cmd_check() {
     fi
   done
 
-  # Optional, best-effort n8n notifications: reuse the ready[] classification
-  # already computed above — no new READY detection, no extra file scan, no
-  # extra markdown parsing is introduced here. Each case fires independently
-  # of the overall gate status of the other artifacts, and each is a no-op
-  # unless its corresponding N8N_*_WEBHOOK_URL is set. See
-  # notify_claude_report_done / notify_codex_review_done above.
+  # Architecture-defined Handoff Package source filename for this Sprint Type
+  # (Sprint-010 section 10.1/10.2): "architecture.md" for implementation,
+  # "reviewed_document.md" for documentation.
+  local arch_file="architecture.md"
+  [[ "$stype" == "documentation" ]] && arch_file="reviewed_document.md"
+
+  # Optional, best-effort n8n notifications + Handoff Package generation:
+  # reuse the ready[] classification already computed above — no new READY
+  # detection, no extra file scan, no extra markdown parsing is introduced
+  # here. Each case fires independently of the overall gate status of the
+  # other artifacts. Notifications are a no-op unless the corresponding
+  # N8N_*_WEBHOOK_URL is set; Handoff Package generation always runs when its
+  # gate condition is met (Review Bridge is the sole Handoff Package
+  # producer, per Sprint-010 Architecture section 5.1). See
+  # notify_claude_report_done / notify_codex_review_done /
+  # write_handoff_package_claude_to_codex / write_handoff_package_codex_to_claude
+  # above.
   for f in "${ready[@]}"; do
     case "$f" in
       claude_report.md)
         notify_claude_report_done "$sprint_id" "$round" "$round_dir/claude_report.md"
+        write_handoff_package_claude_to_codex "$sprint_id" "$round" "$round_dir" "$arch_file" "${ready[@]}"
         ;;
       codex_review.md)
         notify_codex_review_done "$sprint_id" "$round" "codex_review" "$round_dir/codex_review.md"
+        write_handoff_package_codex_to_claude "$sprint_id" "$round" "$round_dir" "$arch_file" "${ready[@]}"
         ;;
       codex_final_review.md)
         notify_codex_review_done "$sprint_id" "$round" "codex_final_review" "$round_dir/codex_final_review.md"

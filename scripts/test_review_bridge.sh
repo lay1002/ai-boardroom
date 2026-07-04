@@ -423,6 +423,85 @@ else
 fi
 
 ###############################################################################
+# Test 20: handoff_package.md generation (Sprint-010, Handoff Package MVP)
+###############################################################################
+echo ""
+echo "=== Test 20: handoff_package.md generation ==="
+
+# 20a: claude_report.md READY (other artifacts still missing) -> handoff
+# package targets Codex; architecture.md is not ready yet, so its reference
+# must be an explicit PLACEHOLDER, never a silently wrong/fabricated path.
+rm -rf "$TEST_DIR/test-handoff-claude"
+cd "$SCRIPT_DIR" && REVIEWS_OVERRIDE="$TEST_DIR" bash "$BRIDGE" init test-handoff-claude 001 2>&1
+cd "$SCRIPT_DIR" && REVIEWS_OVERRIDE="$TEST_DIR" bash "$BRIDGE" skeleton test-handoff-claude 001 --type implementation 2>&1
+echo "# Real content" > "$TEST_DIR/test-handoff-claude/round-001/claude_report.md"
+cd "$SCRIPT_DIR" && REVIEWS_OVERRIDE="$TEST_DIR" bash "$BRIDGE" check test-handoff-claude 001 >/dev/null 2>&1
+handoff_file="$TEST_DIR/test-handoff-claude/round-001/handoff_package.md"
+if [[ -f "$handoff_file" ]]; then
+  echo "  PASS: handoff_package.md created when claude_report.md is READY"
+  ((pass_count++))
+else
+  echo "  FAIL: handoff_package.md not created"
+  ((fail_count++))
+fi
+handoff_content=$(cat "$handoff_file" 2>/dev/null || echo "")
+assert_contains "handoff targets Codex" "$(printf '## 1. Target AI\n\nCodex')" "$handoff_content"
+assert_contains "handoff has Current Stage" "Claude Implementation Completed" "$handoff_content"
+assert_contains "handoff has all 8 sections (spot check section 8)" "## 8. Copyable Prompt" "$handoff_content"
+assert_contains "handoff marks missing architecture.md as PLACEHOLDER" "PLACEHOLDER: reviews/test-handoff-claude/round-001/architecture.md" "$handoff_content"
+assert_contains "handoff references real claude_report.md path" "reviews/test-handoff-claude/round-001/claude_report.md" "$handoff_content"
+
+# 20b: fill architecture.md too, re-run check -> reference upgrades from
+# PLACEHOLDER to the real path once it becomes READY.
+echo "# Architecture" > "$TEST_DIR/test-handoff-claude/round-001/architecture.md"
+cd "$SCRIPT_DIR" && REVIEWS_OVERRIDE="$TEST_DIR" bash "$BRIDGE" check test-handoff-claude 001 >/dev/null 2>&1
+handoff_content=$(cat "$handoff_file")
+if [[ "$handoff_content" != *"PLACEHOLDER: reviews/test-handoff-claude/round-001/architecture.md"* ]]; then
+  echo "  PASS: architecture.md reference upgraded from PLACEHOLDER once it becomes READY"
+  ((pass_count++))
+else
+  echo "  FAIL: architecture.md reference still PLACEHOLDER after becoming READY"
+  ((fail_count++))
+fi
+
+# 20c: codex_review.md also becomes READY -> handoff_package.md is
+# regenerated to target Claude Code (the most-advanced open gate wins),
+# reusing the same ready[] check already computed by `check` (no new READY
+# detection system).
+echo "# Codex review" > "$TEST_DIR/test-handoff-claude/round-001/codex_review.md"
+cd "$SCRIPT_DIR" && REVIEWS_OVERRIDE="$TEST_DIR" bash "$BRIDGE" check test-handoff-claude 001 >/dev/null 2>&1
+handoff_content=$(cat "$handoff_file")
+assert_contains "handoff now targets Claude Code" "$(printf '## 1. Target AI\n\nClaude Code')" "$handoff_content"
+assert_contains "handoff Current Stage updated to Codex Review Completed" "Codex Review Completed" "$handoff_content"
+assert_contains "handoff references codex_review.md" "reviews/test-handoff-claude/round-001/codex_review.md" "$handoff_content"
+
+# 20d: --dry-run does not write handoff_package.md.
+rm -rf "$TEST_DIR/test-handoff-dryrun"
+cd "$SCRIPT_DIR" && REVIEWS_OVERRIDE="$TEST_DIR" bash "$BRIDGE" init test-handoff-dryrun 001 2>&1
+cd "$SCRIPT_DIR" && REVIEWS_OVERRIDE="$TEST_DIR" bash "$BRIDGE" skeleton test-handoff-dryrun 001 --type implementation 2>&1
+echo "# Real content" > "$TEST_DIR/test-handoff-dryrun/round-001/claude_report.md"
+output=$(cd "$SCRIPT_DIR" && REVIEWS_OVERRIDE="$TEST_DIR" bash "$BRIDGE" check test-handoff-dryrun 001 --dry-run 2>&1)
+assert_contains "dry-run shows would-write handoff_package.md" "[dry-run] Would write" "$output"
+if [[ ! -f "$TEST_DIR/test-handoff-dryrun/round-001/handoff_package.md" ]]; then
+  echo "  PASS: dry-run does not create handoff_package.md"
+  ((pass_count++))
+else
+  echo "  FAIL: dry-run created handoff_package.md"
+  ((fail_count++))
+fi
+
+# 20e: documentation Sprint Type references reviewed_document.md instead of
+# architecture.md.
+rm -rf "$TEST_DIR/test-handoff-doc"
+cd "$SCRIPT_DIR" && REVIEWS_OVERRIDE="$TEST_DIR" bash "$BRIDGE" init test-handoff-doc 001 2>&1
+cd "$SCRIPT_DIR" && REVIEWS_OVERRIDE="$TEST_DIR" bash "$BRIDGE" skeleton test-handoff-doc 001 --type documentation 2>&1
+echo "# Real content" > "$TEST_DIR/test-handoff-doc/round-001/claude_report.md"
+echo "# Reviewed doc" > "$TEST_DIR/test-handoff-doc/round-001/reviewed_document.md"
+cd "$SCRIPT_DIR" && REVIEWS_OVERRIDE="$TEST_DIR" bash "$BRIDGE" check test-handoff-doc 001 >/dev/null 2>&1
+doc_handoff=$(cat "$TEST_DIR/test-handoff-doc/round-001/handoff_package.md" 2>/dev/null || echo "")
+assert_contains "documentation sprint handoff references reviewed_document.md" "reviews/test-handoff-doc/round-001/reviewed_document.md" "$doc_handoff"
+
+###############################################################################
 # Sprint-004 E2E compatibility
 ###############################################################################
 echo ""
