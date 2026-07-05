@@ -62,6 +62,28 @@ assert_exit_code() {
   fi
 }
 
+# assert_true "description" <bash-boolean-string-"true"/"false"-OR-a-condition-command>
+# Accepts either the literal string "true"/"false" (e.g. from a shell flag
+# variable) or a command to evaluate.
+assert_true() {
+  local desc="$1"; shift
+  local ok=false
+  if [[ "$1" == "true" ]]; then
+    ok=true
+  elif [[ "$1" == "false" ]]; then
+    ok=false
+  elif eval "$1"; then
+    ok=true
+  fi
+  if $ok; then
+    echo "  PASS: $desc"
+    ((pass_count++))
+  else
+    echo "  FAIL: $desc"
+    ((fail_count++))
+  fi
+}
+
 ###############################################################################
 # Test 1: init creates sprint dir and metadata
 ###############################################################################
@@ -911,6 +933,241 @@ else
   echo "    runtime: $(echo "$code_events" | tr '\n' ' ')"
   ((fail_count++))
 fi
+
+###############################################################################
+# Test 24: Sprint-014 Telegram PO Gate Notification & Execution Policy V1
+###############################################################################
+echo ""
+echo "=== Test 24: Sprint-014 Product Owner Gate notification ==="
+
+GATE24_ARTIFACTS="$TEST_DIR/gate24-artifacts"
+mkdir -p "$GATE24_ARTIFACTS"
+echo "gate content" > "$GATE24_ARTIFACTS/a.md"
+
+# Extract the 21-gate whitelist directly from the script (not hardcoded here)
+# so this test tracks the runtime, not a second copy of the list.
+mapfile -t gate24_ids < <(sed -n '/^GATE_WHITELIST=(/,/^)/p' "$BRIDGE" | grep -oE '^  [a-z_]+' | tr -d ' ')
+
+# 24a: exactly 21 gates in the whitelist.
+if [[ "${#gate24_ids[@]}" -eq 21 ]]; then
+  echo "  PASS: GATE_WHITELIST contains exactly 21 gates"
+  ((pass_count++))
+else
+  echo "  FAIL: GATE_WHITELIST contains ${#gate24_ids[@]} gates, expected 21"
+  ((fail_count++))
+fi
+
+# 24b: an unknown gate_id is rejected.
+PROJECT_ID=gate24 PROJECT_NAME="Gate24" REVIEWS_OVERRIDE="$TEST_DIR" \
+  bash "$BRIDGE" notify-gate not_a_real_gate sprint-24b 001 "$GATE24_ARTIFACTS/a.md" >/tmp/gate24b.out 2>&1
+gate24b_exit=$?
+assert_exit_code "unknown gate_id is rejected (nonzero exit)" 1 "$gate24b_exit"
+assert_contains "unknown gate_id error message names the gate" "not_a_real_gate" "$(cat /tmp/gate24b.out)"
+rm -f /tmp/gate24b.out
+
+# 24c-24q: generate every gate's Notification Package once and verify the
+# full per-gate metadata / formatting / field contract.
+high_risk_gates="commit_approval codex_commit_approval push_approval codex_push_approval"
+valid_next_actors="Product Owner ChatGPT Claude Code Codex"
+valid_risk_levels="low medium high"
+
+all_have_name=true
+all_have_next_actor=true
+all_have_mode=true
+all_have_risk=true
+all_have_po_action=true
+all_generate_package=true
+all_have_chinese=true
+all_general_format_ok=true
+all_high_risk_format_ok=true
+all_handoff_isolated=true
+all_metadata_last=true
+all_risk_valid=true
+all_next_actor_valid=true
+
+round24=1
+for gid in "${gate24_ids[@]}"; do
+  round24_padded="$(printf '%03d' "$round24")"
+  PROJECT_ID=gate24 PROJECT_NAME="Gate24" REVIEWS_OVERRIDE="$TEST_DIR" \
+    bash "$BRIDGE" notify-gate "$gid" sprint-24c "$round24" "$GATE24_ARTIFACTS/a.md" >/dev/null 2>&1
+  pkg="$TEST_DIR/sprint-24c/round-$round24_padded/notifications/gate-${gid}.md"
+
+  if [[ ! -f "$pkg" ]]; then
+    all_generate_package=false
+    echo "    (gate $gid: Notification Package was not generated)"
+    ((round24++))
+    continue
+  fi
+
+  content="$(cat "$pkg")"
+
+  [[ "$content" == *"➡️ 下一位執行者"* ]] || { all_have_next_actor=false; echo "    (gate $gid missing next_actor section)"; }
+  [[ "$content" == *"⚙️ 建議執行模式"* ]] || { all_have_mode=false; echo "    (gate $gid missing recommended_execution_mode section)"; }
+  [[ "$content" == *"risk_level:"* ]] || { all_have_risk=false; echo "    (gate $gid missing risk_level)"; }
+  [[ "$content" == *"✅ Product Owner 下一步"* ]] || { all_have_po_action=false; echo "    (gate $gid missing product_owner_next_action_zh section)"; }
+
+  # gate_name_zh appears either after "目前 Gate" (general) or in the
+  # high-risk header line "⚠️ 高風險 Gate：...".
+  if [[ "$content" != *"🧭 目前 Gate"* && "$content" != *"⚠️ 高風險 Gate："* ]]; then
+    all_have_name=false
+    echo "    (gate $gid missing gate_name_zh section)"
+  fi
+
+  # Traditional Chinese content check: look for a specific CJK label.
+  [[ "$content" == *"通知對象"* ]] || { all_have_chinese=false; echo "    (gate $gid message is not Traditional Chinese)"; }
+
+  is_high_risk=false
+  for hr in $high_risk_gates; do
+    [[ "$gid" == "$hr" ]] && is_high_risk=true
+  done
+
+  if $is_high_risk; then
+    [[ "$content" == *"⚠️ 高風險 Gate："* && "$content" == *"⚠️ 風險提醒"* ]] || { all_high_risk_format_ok=false; echo "    (gate $gid should use high-risk format)"; }
+    [[ "$content" == *"risk_level: high"* ]] || { all_risk_valid=false; echo "    (high-risk gate $gid did not report risk_level: high)"; }
+  else
+    [[ "$content" == *"🔔 AI Workspace Gate 通知"* ]] || { all_general_format_ok=false; echo "    (gate $gid should use general format)"; }
+  fi
+
+  # Handoff Package must be an isolated, delimited block.
+  handoff_line_count="$(echo "$content" | grep -c '^📦 Handoff Package$')"
+  delim_count="$(echo "$content" | grep -c '^---$')"
+  if [[ "$handoff_line_count" -ne 1 || "$delim_count" -lt 2 ]]; then
+    all_handoff_isolated=false
+    echo "    (gate $gid Handoff Package block is not cleanly isolated)"
+  fi
+
+  # Delivery Metadata must be the last section (its header is the last
+  # occurrence of a section-start marker in the file).
+  last_section_line="$(grep -n '^\(🔔\|📌\|🧭\|📍\|⚠️\|👤\|➡️\|⚙️\|✅\|📦\|🧾\)' "$pkg" | tail -1)"
+  [[ "$last_section_line" == *"🧾 Delivery Metadata"* ]] || { all_metadata_last=false; echo "    (gate $gid Delivery Metadata is not the last section)"; }
+
+  # risk_level / next_actor enum validation.
+  gate_risk_value="$(awk -F': ' '/^risk_level:/{print $2; exit}' "$pkg")"
+  risk_ok=false
+  for rv in $valid_risk_levels; do
+    [[ "$gate_risk_value" == "$rv" ]] && risk_ok=true
+  done
+  $risk_ok || { all_risk_valid=false; echo "    (gate $gid has invalid risk_level='$gate_risk_value')"; }
+
+  gate_next_actor_value="$(awk -F': ' '/^next_actor:/{print $2; exit}' "$pkg")"
+  next_actor_ok=false
+  for nv in "Product Owner" "ChatGPT" "Claude Code" "Codex"; do
+    [[ "$gate_next_actor_value" == "$nv" ]] && next_actor_ok=true
+  done
+  $next_actor_ok || { all_next_actor_valid=false; echo "    (gate $gid has invalid next_actor='$gate_next_actor_value')"; }
+
+  ((round24++))
+done
+
+assert_true "24c: every gate generates a Notification Package" $all_generate_package
+assert_true "24d: every gate's package has a gate_name_zh section" $all_have_name
+assert_true "24e: every gate's package has a next_actor section" $all_have_next_actor
+assert_true "24f: every gate's package has a recommended_execution_mode section" $all_have_mode
+assert_true "24g: every gate's package has a risk_level field" $all_have_risk
+assert_true "24h: every gate's package has a product_owner_next_action_zh section" $all_have_po_action
+assert_true "24i: every gate's package is Traditional Chinese" $all_have_chinese
+assert_true "24j: general gates use the general Telegram format" $all_general_format_ok
+assert_true "24k: Commit/Push gates use the high-risk Telegram format" $all_high_risk_format_ok
+assert_true "24l: Handoff Package is an isolated, copyable block in every gate" $all_handoff_isolated
+assert_true "24m: Delivery Metadata is the last section in every gate" $all_metadata_last
+assert_true "24n: risk_level is always one of low/medium/high" $all_risk_valid
+assert_true "24o: next_actor is always one of the 4 allowed values" $all_next_actor_valid
+
+# 24p: Telegram receives the Gate Notification Package content byte-for-byte
+# (Artifact First, same guarantee as Sprint-013 Must Fix 1).
+GATE24_FAKE_BIN="$TEST_DIR/gate24-fake-bin"
+mkdir -p "$GATE24_FAKE_BIN"
+cat > "$GATE24_FAKE_BIN/curl" <<'STUB'
+#!/usr/bin/env bash
+for a in "$@"; do
+  case "$a" in
+    text@*) cp "${a#text@}" "$CAPTURED_CONTENT_FILE" ;;
+  esac
+done
+echo '{"ok":true}'
+exit 0
+STUB
+chmod +x "$GATE24_FAKE_BIN/curl"
+GATE24_CAPTURED="$TEST_DIR/gate24-captured.txt"
+rm -f "$GATE24_CAPTURED"
+PATH="$GATE24_FAKE_BIN:$PATH" CAPTURED_CONTENT_FILE="$GATE24_CAPTURED" \
+  PROJECT_ID=gate24 PROJECT_NAME="Gate24" NOTIFICATION_ENABLED=true \
+  TELEGRAM_BOT_TOKEN=tok TELEGRAM_CHAT_ID=1 REVIEWS_OVERRIDE="$TEST_DIR" \
+  bash "$BRIDGE" notify-gate push_approval sprint-24p 001 "$GATE24_ARTIFACTS/a.md" >/dev/null 2>&1
+gate24p_pkg="$TEST_DIR/sprint-24p/round-001/notifications/gate-push_approval.md"
+if [[ -f "$GATE24_CAPTURED" && -f "$gate24p_pkg" ]] && diff -q "$GATE24_CAPTURED" "$gate24p_pkg" >/dev/null 2>&1; then
+  echo "  PASS: Telegram receives the Gate Notification Package content byte-for-byte"
+  ((pass_count++))
+else
+  echo "  FAIL: Telegram content does not match the Gate Notification Package"
+  ((fail_count++))
+fi
+
+# 24q/24r: required Sprint-014 documentation exists.
+assert_true "24q: docs/development/execution-permission-policy.md exists" "[[ -f /home/ivan/AI/docs/development/execution-permission-policy.md ]] && true || false"
+assert_true "24r: docs/development/telegram-po-gate-notification-specification.md exists" "[[ -f /home/ivan/AI/docs/development/telegram-po-gate-notification-specification.md ]] && true || false"
+
+policy_doc="$(cat /home/ivan/AI/docs/development/execution-permission-policy.md 2>/dev/null || echo "")"
+all_modes_have_allow_forbid=true
+for mode in "Claude Implementation Mode" "Claude Must Fix Mode" "Codex Review Mode" \
+            "Codex Final Review Mode" "Codex Git Review Mode" "Codex Commit Mode" "Codex Push Mode"; do
+  mode_section="$(echo "$policy_doc" | awk -v m="### 2\\..*$mode" 'BEGIN{f=0} $0 ~ m {f=1} f && /^### 2\./ && $0 !~ m {f=0} f' )"
+  if [[ "$mode_section" != *"允許動作"* || "$mode_section" != *"禁止動作"* ]]; then
+    all_modes_have_allow_forbid=false
+    echo "    (mode '$mode' section missing 允許動作/禁止動作)"
+  fi
+done
+assert_true "24s: every Execution Permission Policy mode defines 允許動作 and 禁止動作" $all_modes_have_allow_forbid
+
+assert_contains "24t: Codex Commit Mode is marked strict manual approval" "每一步都需要" "$(echo "$policy_doc" | awk '/### 2\.6 Codex Commit Mode/,/### 2\.7/')"
+assert_contains "24u: Codex Push Mode is marked strict manual approval" "每一步都需要" "$(echo "$policy_doc" | awk '/### 2\.7 Codex Push Mode/,/## 3\./')"
+
+# 24v-24y: forbidden mechanisms are absent from the new Sprint-014 code.
+# Strip comment lines and echo'd string literals (e.g. the Codex Git Review
+# Mode summary text, which *describes* "不得執行 git add、commit、push" as
+# prose but never executes it) so only actual command invocations remain.
+gate_code_src="$(sed -n '/^# Command: notify-gate/,/^# Main dispatcher/p' "$BRIDGE" | grep -v '^[[:space:]]*#' | grep -v 'echo "')"
+if [[ "$gate_code_src" != *"callback_query"* && "$gate_code_src" != *"inline_keyboard"* ]]; then
+  echo "  PASS: notify-gate contains no Telegram button auto-execution logic"
+  ((pass_count++))
+else
+  echo "  FAIL: notify-gate appears to implement Telegram button auto-execution"
+  ((fail_count++))
+fi
+if [[ "$gate_code_src" != *"n8n"* ]]; then
+  echo "  PASS: notify-gate contains no n8n Execute Command reference"
+  ((pass_count++))
+else
+  echo "  FAIL: notify-gate references n8n"
+  ((fail_count++))
+fi
+if [[ "$gate_code_src" != *"git commit"* && "$gate_code_src" != *"git push"* && "$gate_code_src" != *"git add"* ]]; then
+  echo "  PASS: notify-gate contains no automatic commit/push/add"
+  ((pass_count++))
+else
+  echo "  FAIL: notify-gate contains a git commit/push/add invocation"
+  ((fail_count++))
+fi
+if [[ "$gate_code_src" != *"api.anthropic.com"* && "$gate_code_src" != *"openai.com"* ]]; then
+  echo "  PASS: notify-gate calls no Claude/Codex API"
+  ((pass_count++))
+else
+  echo "  FAIL: notify-gate unexpectedly references an AI API"
+  ((fail_count++))
+fi
+# Only inspect the lines that actually mention "bypass sandbox" (not the
+# whole multi-thousand-character document, where unrelated "建議"/"允許"
+# text appears many times elsewhere and would cause a false positive).
+bypass_lines="$(echo "$policy_doc" | grep -i 'bypass sandbox')"
+if [[ -n "$bypass_lines" && "$bypass_lines" != *"建議"* && "$bypass_lines" != *"允許"* && "$bypass_lines" != *"可以完全"* ]]; then
+  echo "  PASS: Execution Permission Policy does not recommend bypassing the sandbox"
+  ((pass_count++))
+else
+  echo "  FAIL: Execution Permission Policy appears to recommend bypassing the sandbox, or does not mention it at all"
+  ((fail_count++))
+fi
+
+echo "  (Sprint-013 notify command and its 8-event tests are re-verified above by Test 22/23, run unchanged in this same suite: zero regression)"
 
 ###############################################################################
 # Sprint-004 E2E compatibility

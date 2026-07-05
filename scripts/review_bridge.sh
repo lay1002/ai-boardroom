@@ -49,6 +49,12 @@ Commands:
                               to Telegram (see docs/development/notification-package-specification.md).
                               Requires PROJECT_ID and PROJECT_NAME env vars. Best-effort: delivery
                               failure never blocks or fails the underlying Sprint/Review Bridge flow.
+  notify-gate                 <gate-id> <sprint-id> <round> <artifact-path>
+                              Generate a Traditional-Chinese Product Owner Gate Notification Package
+                              and optionally deliver it to Telegram (see
+                              docs/development/telegram-po-gate-notification-specification.md).
+                              Requires PROJECT_ID and PROJECT_NAME env vars. Best-effort, no
+                              deduplication (every Gate trigger is a distinct decision point).
 
 Notes:
   - skeleton creates placeholder input artifacts only.
@@ -1721,6 +1727,557 @@ EOF
 }
 
 ###############################################################################
+# Command: notify-gate (Sprint-014 — Telegram PO Gate Notification & Execution
+# Policy V1)
+###############################################################################
+#
+# Additive, project-agnostic Product Owner Gate notification pipeline,
+# separate from Sprint-013's `notify` (event) pipeline above. Does not modify
+# NOTIFY_ALLOWED_EVENTS, _notify_resolve_event_meta, _notify_write_history,
+# _notify_already_delivered, or cmd_notify. Reuses only the generic
+# _notify_split_for_telegram helper (file-based chunking; no Sprint-013
+# behavior change). It never calls Claude, Codex, git commit, or git push,
+# and never auto-approves a Gate.
+#
+# See docs/development/telegram-po-gate-notification-specification.md and
+# docs/development/execution-permission-policy.md.
+
+GATE_WHITELIST=(
+  sprint_start_approval
+  architecture_definition_approval
+  architecture_artifact_approval
+  claude_implementation_approval
+  claude_implementation_report_acceptance
+  codex_review_approval
+  codex_review_result_decision
+  claude_must_fix_approval
+  claude_must_fix_report_acceptance
+  codex_final_review_approval
+  codex_final_review_result_decision
+  product_owner_validation_approval
+  codex_git_review_approval
+  codex_git_review_result_decision
+  commit_approval
+  codex_commit_approval
+  push_approval
+  codex_push_approval
+  retrospective_entry_approval
+  retrospective_content_approval
+  product_owner_closure_approval
+)
+
+# Canonical Traditional-Chinese summary per Recommended Execution Mode, so
+# every Gate that references the same mode shows identical wording (single
+# source of truth, matches docs/development/execution-permission-policy.md).
+_gate_mode_summary_zh() {
+  case "$1" in
+    "Claude Implementation Mode")
+      echo "可在已核准 Scope 內低中斷執行實作，不得自行擴大範圍、不得自動 commit。" ;;
+    "Claude Must Fix Mode")
+      echo "可在核准 Scope 內低中斷執行修正，僅處理 Codex 指出的項目，不得擴大範圍。" ;;
+    "Codex Review Mode")
+      echo "Review 類任務可低中斷執行，僅產出 Review 結果，不修改程式碼、不 commit。" ;;
+    "Codex Final Review Mode")
+      echo "Review 類任務可低中斷執行，僅確認前次意見是否已解決，不修改程式碼、不 commit。" ;;
+    "Codex Git Review Mode")
+      echo "可低中斷執行 git status/diff 範圍檢查，不得執行 git add、commit、push。" ;;
+    "Codex Commit Mode")
+      echo "不得低中斷執行，須逐步確認 commit scope、訊息與排除檔案，且需 Product Owner 明確核准。" ;;
+    "Codex Push Mode")
+      echo "不得低中斷執行，須確認 remote/branch 與 commit hash，且需 Product Owner 明確核准。" ;;
+    "N/A（Product Owner 決策點）")
+      echo "此為 Product Owner 決策點，無需 AI 執行動作。" ;;
+    "N/A（Commit 需人工核准，不可低中斷）")
+      echo "此步驟涉及 Commit，不得由 AI 自動執行，須 Product Owner 親自核准與操作。" ;;
+    "N/A（Push 需人工核准，不可低中斷）")
+      echo "此步驟涉及 Push，不得由 AI 自動執行，須 Product Owner 親自核准與操作。" ;;
+    *)
+      echo "" ;;
+  esac
+}
+
+# Resolve deterministic per-gate metadata. Also doubles as the Gate
+# whitelist: unknown gate_id falls through to `*` and returns 1.
+# next_actor is restricted to Product Owner / ChatGPT / Claude Code / Codex.
+# risk_level is restricted to low / medium / high. The 4 Commit/Push gates
+# are risk_level=high and use the high-risk Telegram layout (Section 7 of
+# the Gate spec); all other gates use the general layout (Section 6).
+GATE_NAME_ZH=""
+GATE_NEXT_ACTOR=""
+GATE_EXEC_MODE=""
+GATE_RISK_LEVEL=""
+GATE_STATUS_ZH=""
+GATE_PO_ACTION_ZH=""
+_gate_resolve_metadata() {
+  local gate_id="$1"
+  case "$gate_id" in
+    sprint_start_approval)
+      GATE_NAME_ZH="Sprint 啟動核准"
+      GATE_NEXT_ACTOR="ChatGPT"
+      GATE_EXEC_MODE="N/A（Product Owner 決策點）"
+      GATE_RISK_LEVEL="low"
+      GATE_STATUS_ZH="已收到新 Sprint 需求，等待 Product Owner 確認是否啟動。"
+      GATE_PO_ACTION_ZH="請確認是否啟動本 Sprint；確認後請 ChatGPT 開始 Architecture 設計。"
+      ;;
+    architecture_definition_approval)
+      GATE_NAME_ZH="Architecture 定義核准"
+      GATE_NEXT_ACTOR="Claude Code"
+      GATE_EXEC_MODE="N/A（Product Owner 決策點）"
+      GATE_RISK_LEVEL="low"
+      GATE_STATUS_ZH="ChatGPT 已完成 Architecture 定義，等待 Product Owner 核准。"
+      GATE_PO_ACTION_ZH="請審閱 Architecture 定義是否符合預期；核准後可交給 Claude Code 開始實作。"
+      ;;
+    architecture_artifact_approval)
+      GATE_NAME_ZH="Architecture Artifact 確認"
+      GATE_NEXT_ACTOR="Claude Code"
+      GATE_EXEC_MODE="N/A（Product Owner 決策點）"
+      GATE_RISK_LEVEL="low"
+      GATE_STATUS_ZH="Architecture Artifact（architecture.md）已建立，等待 Product Owner 確認內容正確。"
+      GATE_PO_ACTION_ZH="請確認 architecture.md 內容與先前核准的決策一致；確認後可交給 Claude Code 實作。"
+      ;;
+    claude_implementation_approval)
+      GATE_NAME_ZH="Claude Implementation 執行核准"
+      GATE_NEXT_ACTOR="Claude Code"
+      GATE_EXEC_MODE="Claude Implementation Mode"
+      GATE_RISK_LEVEL="medium"
+      GATE_STATUS_ZH="Architecture 已核准，等待 Product Owner 授權 Claude Code 開始實作。"
+      GATE_PO_ACTION_ZH="請授權 Claude Code 依已核准 Architecture 開始實作。"
+      ;;
+    claude_implementation_report_acceptance)
+      GATE_NAME_ZH="Claude Implementation Report 驗收"
+      GATE_NEXT_ACTOR="Codex"
+      GATE_EXEC_MODE="N/A（Product Owner 決策點）"
+      GATE_RISK_LEVEL="low"
+      GATE_STATUS_ZH="Claude Code 已完成實作並產出 claude_report.md，等待 Product Owner 驗收。"
+      GATE_PO_ACTION_ZH="請審閱 claude_report.md；驗收後可交給 Codex 進行 Review。"
+      ;;
+    codex_review_approval)
+      GATE_NAME_ZH="Codex Review 執行核准"
+      GATE_NEXT_ACTOR="Codex"
+      GATE_EXEC_MODE="Codex Review Mode"
+      GATE_RISK_LEVEL="low"
+      GATE_STATUS_ZH="Claude Implementation Report 已驗收，等待 Product Owner 授權 Codex 開始 Review。"
+      GATE_PO_ACTION_ZH="請授權 Codex 開始進行 Review。"
+      ;;
+    codex_review_result_decision)
+      GATE_NAME_ZH="Codex Review 結果決策"
+      GATE_NEXT_ACTOR="Claude Code"
+      GATE_EXEC_MODE="N/A（Product Owner 決策點）"
+      GATE_RISK_LEVEL="low"
+      GATE_STATUS_ZH="Codex 已完成 Review，等待 Product Owner 決定下一步。"
+      GATE_PO_ACTION_ZH="請審閱 codex_review.md 結論；若有 Must Fix，請授權 Claude Code 進行修正，否則可進入下一階段。"
+      ;;
+    claude_must_fix_approval)
+      GATE_NAME_ZH="Claude Must Fix 執行核准"
+      GATE_NEXT_ACTOR="Claude Code"
+      GATE_EXEC_MODE="Claude Must Fix Mode"
+      GATE_RISK_LEVEL="medium"
+      GATE_STATUS_ZH="Codex Review 指出 Must Fix 項目，等待 Product Owner 授權 Claude Code 進行修正。"
+      GATE_PO_ACTION_ZH="請授權 Claude Code 依 codex_review.md 的 Must Fix 項目進行修正。"
+      ;;
+    claude_must_fix_report_acceptance)
+      GATE_NAME_ZH="Claude Must Fix Report 驗收"
+      GATE_NEXT_ACTOR="Codex"
+      GATE_EXEC_MODE="N/A（Product Owner 決策點）"
+      GATE_RISK_LEVEL="low"
+      GATE_STATUS_ZH="Claude Code 已完成 Must Fix 修正並產出報告，等待 Product Owner 驗收。"
+      GATE_PO_ACTION_ZH="請審閱 Must Fix Report；驗收後可交給 Codex 進行 Final Review。"
+      ;;
+    codex_final_review_approval)
+      GATE_NAME_ZH="Codex Final Review 執行核准"
+      GATE_NEXT_ACTOR="Codex"
+      GATE_EXEC_MODE="Codex Final Review Mode"
+      GATE_RISK_LEVEL="low"
+      GATE_STATUS_ZH="Must Fix Report 已驗收，等待 Product Owner 授權 Codex 進行 Final Review。"
+      GATE_PO_ACTION_ZH="請授權 Codex 開始 Final Review。"
+      ;;
+    codex_final_review_result_decision)
+      GATE_NAME_ZH="Codex Final Review 結果決策"
+      GATE_NEXT_ACTOR="Product Owner"
+      GATE_EXEC_MODE="N/A（Product Owner 決策點）"
+      GATE_RISK_LEVEL="low"
+      GATE_STATUS_ZH="Codex 已完成 Final Review，等待 Product Owner 決定是否進入下一階段。"
+      GATE_PO_ACTION_ZH="請審閱 codex_final_review.md 結論，決定是否進入 Product Owner Validation 或需要再一輪修正。"
+      ;;
+    product_owner_validation_approval)
+      GATE_NAME_ZH="Product Owner Validation 核准"
+      GATE_NEXT_ACTOR="Product Owner"
+      GATE_EXEC_MODE="N/A（Product Owner 決策點）"
+      GATE_RISK_LEVEL="low"
+      GATE_STATUS_ZH="Final Review 已 PASS，等待 Product Owner 進行最終驗證。"
+      GATE_PO_ACTION_ZH="請實際驗證本輪成果，確認後可進入 Git Review 階段。"
+      ;;
+    codex_git_review_approval)
+      GATE_NAME_ZH="Codex Git Review 執行核准"
+      GATE_NEXT_ACTOR="Codex"
+      GATE_EXEC_MODE="Codex Git Review Mode"
+      GATE_RISK_LEVEL="medium"
+      GATE_STATUS_ZH="Product Owner Validation 已完成，等待授權 Codex 進行 Git Review。"
+      GATE_PO_ACTION_ZH="請授權 Codex 檢查 git 變更範圍是否乾淨、是否符合本 Sprint 範圍。"
+      ;;
+    codex_git_review_result_decision)
+      GATE_NAME_ZH="Codex Git Review 結果決策"
+      GATE_NEXT_ACTOR="Product Owner"
+      GATE_EXEC_MODE="N/A（Product Owner 決策點）"
+      GATE_RISK_LEVEL="medium"
+      GATE_STATUS_ZH="Codex 已完成 Git Review，等待 Product Owner 決定是否進入 Commit 階段。"
+      GATE_PO_ACTION_ZH="請審閱 Git Review 結果，確認 commit scope 乾淨後再決定是否核准 Commit。"
+      ;;
+    commit_approval)
+      GATE_NAME_ZH="Commit 核准"
+      GATE_NEXT_ACTOR="Product Owner"
+      GATE_EXEC_MODE="N/A（Commit 需人工核准，不可低中斷）"
+      GATE_RISK_LEVEL="high"
+      GATE_STATUS_ZH="Git Review 已通過，等待 Product Owner 明確核准 Commit。"
+      GATE_PO_ACTION_ZH="請確認 commit scope、排除檔案與訊息內容後，明確核准是否執行 Commit。"
+      ;;
+    codex_commit_approval)
+      GATE_NAME_ZH="Codex Commit 執行核准"
+      GATE_NEXT_ACTOR="Codex"
+      GATE_EXEC_MODE="Codex Commit Mode"
+      GATE_RISK_LEVEL="high"
+      GATE_STATUS_ZH="Product Owner 已核准 Commit 方向，等待授權 Codex 準備 commit 內容供人工核准。"
+      GATE_PO_ACTION_ZH="請授權 Codex 準備 commit 訊息與範圍草案，最終仍由 Product Owner 親自核准並執行 commit。"
+      ;;
+    push_approval)
+      GATE_NAME_ZH="Push 核准"
+      GATE_NEXT_ACTOR="Product Owner"
+      GATE_EXEC_MODE="N/A（Push 需人工核准，不可低中斷）"
+      GATE_RISK_LEVEL="high"
+      GATE_STATUS_ZH="Commit 已完成，等待 Product Owner 明確核准 Push。"
+      GATE_PO_ACTION_ZH="請確認 commit hash、目標 remote/branch 後，明確核准是否執行 Push。"
+      ;;
+    codex_push_approval)
+      GATE_NAME_ZH="Codex Push 執行核准"
+      GATE_NEXT_ACTOR="Codex"
+      GATE_EXEC_MODE="Codex Push Mode"
+      GATE_RISK_LEVEL="high"
+      GATE_STATUS_ZH="Product Owner 已核准 Push 方向，等待授權 Codex 準備 push 前檢查供人工核准。"
+      GATE_PO_ACTION_ZH="請授權 Codex 確認 push 前檢查清單，最終仍由 Product Owner 親自核准並執行 push。"
+      ;;
+    retrospective_entry_approval)
+      GATE_NAME_ZH="Sprint Retrospective 啟動核准"
+      GATE_NEXT_ACTOR="Claude Code"
+      GATE_EXEC_MODE="N/A（Product Owner 決策點）"
+      GATE_RISK_LEVEL="low"
+      GATE_STATUS_ZH="本輪主要工作已完成，等待 Product Owner 授權開始 Sprint Retrospective。"
+      GATE_PO_ACTION_ZH="請授權 Claude Code 撰寫 Sprint Retrospective 草稿。"
+      ;;
+    retrospective_content_approval)
+      GATE_NAME_ZH="Sprint Retrospective 內容核准"
+      GATE_NEXT_ACTOR="Product Owner"
+      GATE_EXEC_MODE="N/A（Product Owner 決策點）"
+      GATE_RISK_LEVEL="low"
+      GATE_STATUS_ZH="Sprint Retrospective 草稿已完成，等待 Product Owner 核准內容與 Decision 區塊。"
+      GATE_PO_ACTION_ZH="請審閱 Retrospective 內容，填寫 Product Owner Decision。"
+      ;;
+    product_owner_closure_approval)
+      GATE_NAME_ZH="Sprint 結案核准"
+      GATE_NEXT_ACTOR="Product Owner"
+      GATE_EXEC_MODE="N/A（Product Owner 決策點）"
+      GATE_RISK_LEVEL="low"
+      GATE_STATUS_ZH="Retrospective 已核准，等待 Product Owner 進行最終 Sprint 結案。"
+      GATE_PO_ACTION_ZH="請確認 Definition of Done 全部項目皆已完成，並給予本 Sprint 最終結案核准。"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  return 0
+}
+
+# Return 0 (true) if gate_id is one of the 4 Commit/Push high-risk gates.
+_gate_is_high_risk() {
+  case "$1" in
+    commit_approval|codex_commit_approval|push_approval|codex_push_approval)
+      return 0 ;;
+    *)
+      return 1 ;;
+  esac
+}
+
+# Append one JSON line to the shared notification history file. Uses
+# python3 for correct JSON construction. Never receives TELEGRAM_BOT_TOKEN /
+# TELEGRAM_CHAT_ID. Distinguished from Sprint-013 event records by
+# "record_type": "gate" plus gate_id / risk_level fields.
+_gate_write_history() {
+  local history_file="$1"; shift
+  python3 - "$history_file" "$@" <<'PY'
+import json
+import sys
+
+(history_file, project_id, project_name, sprint_id, round_id, gate_id,
+ next_actor, risk_level, notification_package_path, delivery_channel,
+ delivery_status, created_at, delivered_at, error_message) = sys.argv[1:15]
+
+record = {
+    "record_type": "gate",
+    "project_id": project_id,
+    "project_name": project_name,
+    "sprint_id": sprint_id,
+    "round_id": round_id,
+    "gate_id": gate_id,
+    "event_type": gate_id,
+    "notification_recipient": "Product Owner",
+    "next_actor": next_actor,
+    "risk_level": risk_level,
+    "notification_package_path": notification_package_path,
+    "delivery_channel": delivery_channel,
+    "delivery_status": delivery_status,
+    "created_at": created_at,
+    "delivered_at": delivered_at or None,
+    "error_message": error_message or None,
+}
+
+with open(history_file, "a", encoding="utf-8") as f:
+    f.write(json.dumps(record, ensure_ascii=False) + "\n")
+PY
+}
+
+cmd_notify_gate() {
+  local gate_id="${1:?Usage: review_bridge.sh notify-gate <gate-id> <sprint-id> <round> <artifact-path>}"
+  shift
+  local sprint_id="${1:?Usage: review_bridge.sh notify-gate <gate-id> <sprint-id> <round> <artifact-path>}"
+  shift
+  local round="${1:?Usage: review_bridge.sh notify-gate <gate-id> <sprint-id> <round> <artifact-path>}"
+  shift
+  local artifact_path="${1:?Usage: review_bridge.sh notify-gate <gate-id> <sprint-id> <round> <artifact-path>}"
+  shift
+
+  parse_dry_run "$@"
+
+  if [[ "$artifact_path" == *".."* ]]; then
+    die "Invalid artifact-path: '$artifact_path' (contains forbidden characters)"
+  fi
+
+  if ! _gate_resolve_metadata "$gate_id"; then
+    die "Invalid gate_id: '$gate_id'. Allowed: ${GATE_WHITELIST[*]}"
+  fi
+
+  validate_id "$sprint_id" "sprint-id"
+  round="$(validate_round "$round")"
+  local round_id="round-$round"
+
+  local project_id="${PROJECT_ID:-}"
+  local project_name="${PROJECT_NAME:-}"
+  [[ -z "$project_id" ]] && die "PROJECT_ID environment variable is required (no default is assumed)"
+  [[ -z "$project_name" ]] && die "PROJECT_NAME environment variable is required (no default is assumed)"
+
+  local history_file="$REVIEWS_DIR/notification_history.jsonl"
+
+  local abs_artifact_path
+  if [[ "$artifact_path" = /* ]]; then
+    abs_artifact_path="$artifact_path"
+  else
+    abs_artifact_path="$REPO_ROOT/$artifact_path"
+  fi
+
+  local created_at
+  created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  if [[ ! -f "$abs_artifact_path" ]]; then
+    if ! $DRY_RUN; then
+      _gate_write_history "$history_file" \
+        "$project_id" "$project_name" "$sprint_id" "$round_id" "$gate_id" \
+        "$GATE_NEXT_ACTOR" "$GATE_RISK_LEVEL" "" "telegram" "failed" \
+        "$created_at" "" "Artifact not found: $artifact_path"
+    fi
+    die "Artifact not found: $artifact_path"
+  fi
+
+  local notif_dir="$REVIEWS_DIR/$sprint_id/round-$round/notifications"
+  local notif_path="$notif_dir/gate-${gate_id}.md"
+
+  if $DRY_RUN; then
+    echo "[dry-run] Would write $notif_path"
+    echo "[dry-run] Would POST to Telegram Bot API if NOTIFICATION_ENABLED=true and config is present"
+    echo "[dry-run] No deduplication is applied to Gate notifications"
+    return 0
+  fi
+
+  mkdir -p "$notif_dir"
+
+  local mode_summary_zh
+  mode_summary_zh="$(_gate_mode_summary_zh "$GATE_EXEC_MODE")"
+
+  # Handoff Package: an independently copyable block (Section 11 of the Gate
+  # spec). Never mixed with Delivery Metadata.
+  local handoff_package
+  handoff_package="$(cat <<EOF
+請閱讀：
+- ${artifact_path}
+
+Sprint: ${sprint_id}
+Round: ${round_id}
+Gate: ${gate_id}
+若 Product Owner 決定轉交，下一位執行者為: ${GATE_NEXT_ACTOR}
+
+${GATE_PO_ACTION_ZH}
+EOF
+)"
+
+  # The Notification Package IS the rendered Traditional-Chinese Telegram
+  # layout (Section 8 of docs/development/telegram-po-gate-notification-specification.md):
+  # no separate data structure is kept and re-rendered later (Artifact
+  # First). Delivery Status is always "pending" at generation time; the
+  # authoritative outcome is recorded only in Notification History.
+  if _gate_is_high_risk "$gate_id"; then
+    cat > "$notif_path" <<EOF
+⚠️ 高風險 Gate：${GATE_NAME_ZH}
+
+📌 Sprint
+${sprint_id} / ${round_id}
+
+📍 目前狀態
+${GATE_STATUS_ZH}
+
+⚠️ 風險提醒
+此步驟可能涉及 Commit / Push，必須確認範圍、commit hash、remote / branch 與排除檔案。
+
+👤 通知對象
+Product Owner
+
+➡️ 下一位執行者
+${GATE_NEXT_ACTOR}
+
+⚙️ 建議執行模式
+${GATE_EXEC_MODE}
+${mode_summary_zh}
+
+✅ Product Owner 下一步
+${GATE_PO_ACTION_ZH}
+
+📦 Handoff Package
+---
+${handoff_package}
+---
+
+🧾 Delivery Metadata
+gate_id: ${gate_id}
+event_type: ${gate_id}
+project_id: ${project_id}
+project_name: ${project_name}
+notification_recipient: Product Owner
+next_actor: ${GATE_NEXT_ACTOR}
+risk_level: high
+delivery_channel: telegram
+delivery_status: pending
+created_at: ${created_at}
+EOF
+  else
+    cat > "$notif_path" <<EOF
+🔔 AI Workspace Gate 通知
+
+📌 Sprint
+${sprint_id} / ${round_id}
+
+🧭 目前 Gate
+${GATE_NAME_ZH}
+
+📍 目前狀態
+${GATE_STATUS_ZH}
+
+👤 通知對象
+Product Owner
+
+➡️ 下一位執行者
+${GATE_NEXT_ACTOR}
+
+⚙️ 建議執行模式
+${GATE_EXEC_MODE}
+${mode_summary_zh}
+
+✅ Product Owner 下一步
+${GATE_PO_ACTION_ZH}
+
+📦 Handoff Package
+---
+${handoff_package}
+---
+
+🧾 Delivery Metadata
+gate_id: ${gate_id}
+event_type: ${gate_id}
+project_id: ${project_id}
+project_name: ${project_name}
+notification_recipient: Product Owner
+next_actor: ${GATE_NEXT_ACTOR}
+risk_level: ${GATE_RISK_LEVEL}
+delivery_channel: telegram
+delivery_status: pending
+created_at: ${created_at}
+EOF
+  fi
+
+  echo "Written: $notif_path"
+
+  # No deduplication for Gate notifications: every trigger is a distinct
+  # Product Owner decision point (see Gate spec Section 14).
+  local delivery_status delivered_at error_message
+  delivered_at=""
+  error_message=""
+
+  if [[ "${NOTIFICATION_ENABLED:-}" != "true" ]]; then
+    delivery_status="disabled"
+    echo "Telegram delivery disabled (NOTIFICATION_ENABLED is not 'true')."
+  elif [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${TELEGRAM_CHAT_ID:-}" ]]; then
+    delivery_status="disabled"
+    echo "Telegram delivery disabled (TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is not set)."
+  elif ! command -v curl >/dev/null 2>&1; then
+    delivery_status="failed"
+    error_message="curl is not installed"
+    echo "WARNING: curl is not installed; cannot deliver to Telegram." >&2
+  else
+    # Artifact First (Sprint-013 Must Fix 1 pattern): send the Notification
+    # Package artifact's own text, unmodified. No separate message is
+    # composed.
+    local chunk_dir
+    chunk_dir="$(mktemp -d)"
+    _notify_split_for_telegram "$notif_path" "$chunk_dir"
+
+    local all_ok=true
+    local any_attempted=false
+    local chunk_file
+    for chunk_file in "$chunk_dir"/chunk-*.txt; do
+      [[ -f "$chunk_file" ]] || continue
+      any_attempted=true
+      local telegram_url="https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage"
+      local response
+      if response="$(curl -fsS --max-time 5 -X POST "$telegram_url" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text@${chunk_file}" 2>/dev/null)"; then
+        echo "$response" | grep -q '"ok":true' || all_ok=false
+      else
+        all_ok=false
+      fi
+    done
+    rm -rf "$chunk_dir"
+
+    if ! $any_attempted; then
+      delivery_status="failed"
+      error_message="No message chunks were produced from the Notification Package"
+      echo "WARNING: Telegram delivery produced no chunks to send. Continuing without blocking the workflow." >&2
+    elif $all_ok; then
+      delivery_status="delivered"
+      delivered_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      echo "Telegram delivery: delivered (Gate Notification Package sent verbatim)."
+    else
+      delivery_status="failed"
+      error_message="Telegram API request failed for at least one message chunk"
+      echo "WARNING: Telegram API request failed. Continuing without blocking the workflow." >&2
+    fi
+  fi
+
+  _gate_write_history "$history_file" \
+    "$project_id" "$project_name" "$sprint_id" "$round_id" "$gate_id" \
+    "$GATE_NEXT_ACTOR" "$GATE_RISK_LEVEL" "$notif_path" "telegram" \
+    "$delivery_status" "$created_at" "$delivered_at" "$error_message"
+
+  echo "Notification history updated: $history_file (delivery_status=$delivery_status)"
+  return 0
+}
+
+###############################################################################
 # Main dispatcher
 ###############################################################################
 
@@ -1737,5 +2294,6 @@ case "$COMMAND" in
   consensus)             cmd_consensus "$@" ;;
   finalize)              cmd_finalize "$@" ;;
   notify)                cmd_notify "$@" ;;
+  notify-gate)           cmd_notify_gate "$@" ;;
   *)                     die_usage "Unknown command: '$COMMAND'." ;;
 esac
