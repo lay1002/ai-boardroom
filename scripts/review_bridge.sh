@@ -1996,6 +1996,47 @@ _gate_is_high_risk() {
   esac
 }
 
+# Sprint-016 validation hardening: defensively re-validate the metadata that
+# _gate_resolve_metadata() just populated against the canonical enums in
+# docs/development/product-owner-gate-metadata.md and
+# docs/development/telegram-po-gate-notification-specification.md (next_actor
+# Section 8, recommended_execution_mode Section 9, risk_level Section 10).
+# All 21 gate_id cases already hardcode correct values, so this never fails
+# today; it exists to catch a future maintenance mistake (e.g. a typo when a
+# 22nd gate is added) before it ever reaches a Telegram message. Does not
+# change delivery behavior.
+#
+# GATE_EXEC_MODE allowed values (Sprint-016 Must Fix round): the 7 mode names
+# defined in docs/development/execution-permission-policy.md Section 2, plus
+# the 3 "N/A（...）" decision-point/manual-gate values actually used by
+# _gate_resolve_metadata() below. This list must be kept in sync with that
+# function; it is not derived automatically because bash has no reflection
+# over the values a function assigns.
+_gate_validate_metadata() {
+  local gate_id="$1"
+  case "$GATE_NEXT_ACTOR" in
+    "Product Owner"|"ChatGPT"|"Claude Code"|"Codex") ;;
+    *) die "Internal error: gate '$gate_id' has invalid next_actor '$GATE_NEXT_ACTOR' (must be Product Owner / ChatGPT / Claude Code / Codex)" ;;
+  esac
+  case "$GATE_EXEC_MODE" in
+    "Claude Implementation Mode"|"Claude Must Fix Mode"|"Codex Review Mode"|\
+    "Codex Final Review Mode"|"Codex Git Review Mode"|"Codex Commit Mode"|"Codex Push Mode"|\
+    "N/A（Product Owner 決策點）"|"N/A（Commit 需人工核准，不可低中斷）"|"N/A（Push 需人工核准，不可低中斷）") ;;
+    *) die "Internal error: gate '$gate_id' has invalid recommended_execution_mode '$GATE_EXEC_MODE' (must be one of the 7 execution-permission-policy.md modes, or an approved N/A decision-point value)" ;;
+  esac
+  case "$GATE_RISK_LEVEL" in
+    low|medium|high) ;;
+    *) die "Internal error: gate '$gate_id' has invalid risk_level '$GATE_RISK_LEVEL' (must be low / medium / high)" ;;
+  esac
+  if _gate_is_high_risk "$gate_id" && [[ "$GATE_RISK_LEVEL" != "high" ]]; then
+    die "Internal error: gate '$gate_id' is a Commit/Push high-risk gate but risk_level is '$GATE_RISK_LEVEL', not 'high'"
+  fi
+  [[ -n "$GATE_NAME_ZH" ]] || die "Internal error: gate '$gate_id' has an empty gate_name_zh"
+  [[ -n "$GATE_STATUS_ZH" ]] || die "Internal error: gate '$gate_id' has an empty current_status_zh"
+  [[ -n "$GATE_PO_ACTION_ZH" ]] || die "Internal error: gate '$gate_id' has an empty product_owner_next_action_zh"
+  return 0
+}
+
 # Append one JSON line to the shared notification history file. Uses
 # python3 for correct JSON construction. Never receives TELEGRAM_BOT_TOKEN /
 # TELEGRAM_CHAT_ID. Distinguished from Sprint-013 event records by
@@ -2053,6 +2094,7 @@ cmd_notify_gate() {
   if ! _gate_resolve_metadata "$gate_id"; then
     die "Invalid gate_id: '$gate_id'. Allowed: ${GATE_WHITELIST[*]}"
   fi
+  _gate_validate_metadata "$gate_id"
 
   validate_id "$sprint_id" "sprint-id"
   round="$(validate_round "$round")"
@@ -2161,7 +2203,7 @@ notification_recipient: Product Owner
 next_actor: ${GATE_NEXT_ACTOR}
 risk_level: high
 delivery_channel: telegram
-delivery_status: pending
+delivery_status: pending（Notification Package 產生當下狀態，非實際送達結果；實際送達結果請查 Notification History）
 created_at: ${created_at}
 EOF
   else
@@ -2204,7 +2246,7 @@ notification_recipient: Product Owner
 next_actor: ${GATE_NEXT_ACTOR}
 risk_level: ${GATE_RISK_LEVEL}
 delivery_channel: telegram
-delivery_status: pending
+delivery_status: pending（Notification Package 產生當下狀態，非實際送達結果；實際送達結果請查 Notification History）
 created_at: ${created_at}
 EOF
   fi

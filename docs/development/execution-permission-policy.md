@@ -1,8 +1,8 @@
 # Execution Permission Policy
 
-> Claude Code / Codex Execution Mode Policy — Sprint-014
+> Claude Code / Codex Execution Mode Policy — Sprint-014, extended in Sprint-016
 
-Version: 1.0 (Sprint-014)
+Version: 1.1 (Sprint-014; Sandboxed Low-Risk Auto-Approval Policy added in Sprint-016)
 
 ---
 
@@ -130,6 +130,60 @@ Each mode is entered only after its corresponding Product Owner Gate (see `docs/
 
 ---
 
-## 5. Out of Scope
+## 5. Sandboxed Low-Risk Auto-Approval Policy (Sprint-016)
 
-This document does not define: Telegram button auto-execution, n8n Execute Command, automatic Claude/Codex invocation, automatic Commit, automatic Push, full sandbox bypass, AI Auto Loop, multi-user permission management, or a Web UI / Notification Center. None of these are introduced by Sprint-014.
+This section defines **Safety Levels** for individual tools/commands that Claude Code or Codex may run while operating inside an already-approved mode (Section 2). Safety Levels classify *commands*, not *Product Owner Gate decisions* — see the important distinction in Section 5.5.
+
+### 5.1 Level 0 — Read-Only Sandbox Safe (may be auto-approved)
+
+A command qualifies for Level 0 only if it satisfies **all** of the following simultaneously: sandboxed, read-only, non-destructive, pre-planned, no file modification, no git state change, no runtime state change, no external service operation, no credential / secret access, no scope expansion.
+
+Allowed examples: `ls`, `pwd`, `cat`, `sed -n`, `grep`, `find`, `git status --short`, `git diff --name-only`, `git diff --cached --name-only`, `git branch --show-current`, `git remote -v`, `git log -1 --oneline`.
+
+Level 0 commands may be run without asking Product Owner for permission on each individual invocation, **within the bounds of an already-approved mode**. Level 0 status never extends to approving a Product Owner Gate itself (Section 5.5), and never extends to a command outside this exact list without being re-classified first.
+
+### 5.2 Level 1 — Local Write, Sprint-Allowed Files Only
+
+Writing to files that are explicitly listed as Allowed Files in the active Sprint's Architecture / Handoff Package. Not auto-approved; requires the Handoff Package's existing authorization to enter the mode (Section 2), but does not require a fresh approval for each individual write within that already-approved scope.
+
+### 5.3 Level 2 — Review / Validation
+
+Running tests, linters, or other validation commands scoped to the active Sprint. Not fully auto-approved; requires the mode's existing Handoff Package authorization, same as Level 1.
+
+### 5.4 Level 3 — High Risk / Manual Gate Required (never auto-approved)
+
+Always requires explicit, synchronous Product Owner approval, regardless of mode:
+
+```text
+git add
+git commit
+git push
+rm
+mv
+chmod
+chown
+curl
+wget
+scp
+ssh
+docker exec
+docker compose up/down
+modifying n8n workflow JSON
+modifying Telegram notification runtime behavior
+modifying notification delivery behavior
+automatically invoking Claude
+automatically invoking Codex
+credential / secret access
+scope expansion
+approving a high-risk Product Owner Gate
+approving a commit Gate
+approving a push Gate
+```
+
+### 5.5 Critical Distinction: Command Safety Level ≠ Gate Approval
+
+A Safety Level classifies a **tool invocation**, not a **Product Owner Gate decision**. All 21 Product Owner Gates defined in `docs/development/telegram-po-gate-notification-specification.md` require explicit Product Owner approval regardless of their `risk_level` metadata — a `low`-risk Gate (e.g. `sprint_start_approval`) is never auto-approved just because Level 0 commands could safely be used to gather information for it. Level 0 only means: while preparing information for *any* Gate (including the 4 high-risk Commit/Push Gates), Claude Code / Codex may freely run Level 0 read-only commands like `git status --short` without asking permission for each one — it never means the Gate's own approval can be skipped, automated, or inferred from the results of those commands.
+
+## 6. Out of Scope
+
+This document does not define: Telegram button auto-execution, n8n Execute Command, automatic Claude/Codex invocation, automatic Commit, automatic Push, full sandbox bypass, AI Auto Loop, multi-user permission management, or a Web UI / Notification Center. None of these are introduced by Sprint-014 or Sprint-016. Sprint-016's Sandboxed Low-Risk Auto-Approval Policy (Section 5) does not change this: Level 0 is strictly read-only and cannot be used to implement, approximate, or work around any of the excluded items above.

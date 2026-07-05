@@ -1170,6 +1170,199 @@ fi
 echo "  (Sprint-013 notify command and its 8-event tests are re-verified above by Test 22/23, run unchanged in this same suite: zero regression)"
 
 ###############################################################################
+# Test 25: Sprint-016 Gate Metadata Canonicalization & Validation Hardening
+###############################################################################
+echo ""
+echo "=== Test 25: Sprint-016 canonical metadata, validation hardening, safety levels ==="
+
+GATE25_ARTIFACTS="$TEST_DIR/gate25-artifacts"
+mkdir -p "$GATE25_ARTIFACTS"
+echo "gate25 content" > "$GATE25_ARTIFACTS/a.md"
+
+canonical_doc="$(cat /home/ivan/AI/docs/development/product-owner-gate-metadata.md 2>/dev/null || echo "")"
+assert_true "25a: docs/development/product-owner-gate-metadata.md exists" "[[ -f /home/ivan/AI/docs/development/product-owner-gate-metadata.md ]] && true || false"
+
+# 25b: every one of the 21 gate_ids from the runtime whitelist is documented
+# in the canonical metadata doc (requirement 1: 21 個 Gate metadata 存在).
+mapfile -t gate25_ids < <(sed -n '/^GATE_WHITELIST=(/,/^)/p' "$BRIDGE" | grep -oE '^  [a-z_]+' | tr -d ' ')
+all_gates_documented=true
+for gid in "${gate25_ids[@]}"; do
+  [[ "$canonical_doc" == *"\`$gid\`"* ]] || { all_gates_documented=false; echo "    (canonical doc missing gate_id '$gid')"; }
+done
+assert_true "25b: all 21 gate_ids from the runtime are documented in the canonical metadata" $all_gates_documented
+
+# 25c: unknown gate_id is still rejected (requirement 2), and validation
+# hardening does not change this pre-existing behavior.
+PROJECT_ID=gate25 PROJECT_NAME="Gate25" REVIEWS_OVERRIDE="$TEST_DIR" \
+  bash "$BRIDGE" notify-gate not_a_real_gate_25 sprint-25c 001 "$GATE25_ARTIFACTS/a.md" >/tmp/gate25c.out 2>&1
+assert_exit_code "25c: unknown gate_id is still rejected after validation hardening" 1 "$?"
+rm -f /tmp/gate25c.out
+
+# 25d-25f: every real gate still produces next_actor / recommended_execution_mode
+# / risk_level (requirements 3-5), now passing through _gate_validate_metadata
+# without being rejected (i.e. hardening doesn't break any of the 21 gates).
+all_pass_validation=true
+round25=1
+for gid in "${gate25_ids[@]}"; do
+  round25_padded="$(printf '%03d' "$round25")"
+  PROJECT_ID=gate25 PROJECT_NAME="Gate25" REVIEWS_OVERRIDE="$TEST_DIR" \
+    bash "$BRIDGE" notify-gate "$gid" sprint-25d "$round25" "$GATE25_ARTIFACTS/a.md" >/tmp/gate25d.out 2>&1
+  if grep -q "Internal error" /tmp/gate25d.out; then
+    all_pass_validation=false
+    echo "    (gate $gid failed _gate_validate_metadata: $(cat /tmp/gate25d.out))"
+  fi
+  ((round25++))
+done
+rm -f /tmp/gate25d.out
+assert_true "25d/e/f: all 21 gates pass the new validation hardening (next_actor/mode/risk_level all valid)" $all_pass_validation
+
+# 25g: high-risk gates contain the required warning wording elements
+# (requirement 6).
+all_high_risk_wording_ok=true
+for hr in commit_approval codex_commit_approval push_approval codex_push_approval; do
+  # Re-derive the round number actually used for this gate_id in the 25d loop.
+  idx=0
+  for gid in "${gate25_ids[@]}"; do
+    idx=$((idx+1))
+    [[ "$gid" == "$hr" ]] && break
+  done
+  pkg="$TEST_DIR/sprint-25d/round-$(printf '%03d' "$idx")/notifications/gate-${hr}.md"
+  content="$(cat "$pkg" 2>/dev/null || echo "")"
+  if [[ "$content" != *"⚠️ 高風險 Gate："* || "$content" != *"⚠️ 風險提醒"* || "$content" != *"risk_level: high"* ]]; then
+    all_high_risk_wording_ok=false
+    echo "    (high-risk gate $hr missing required warning wording)"
+  fi
+done
+assert_true "25g: all 4 high-risk gates contain required warning wording (⚠️ header, risk reminder, risk_level: high)" $all_high_risk_wording_ok
+
+# 25h: commit/push gates retain explicit Manual Gate wording (requirement 7).
+all_manual_gate_wording_ok=true
+for hr in commit_approval push_approval; do
+  idx=0
+  for gid in "${gate25_ids[@]}"; do
+    idx=$((idx+1))
+    [[ "$gid" == "$hr" ]] && break
+  done
+  pkg="$TEST_DIR/sprint-25d/round-$(printf '%03d' "$idx")/notifications/gate-${hr}.md"
+  content="$(cat "$pkg" 2>/dev/null || echo "")"
+  [[ "$content" == *"人工核准"* || "$content" == *"不可低中斷"* ]] || { all_manual_gate_wording_ok=false; echo "    (gate $hr missing Manual Gate wording)"; }
+done
+for hr in codex_commit_approval codex_push_approval; do
+  idx=0
+  for gid in "${gate25_ids[@]}"; do
+    idx=$((idx+1))
+    [[ "$gid" == "$hr" ]] && break
+  done
+  pkg="$TEST_DIR/sprint-25d/round-$(printf '%03d' "$idx")/notifications/gate-${hr}.md"
+  content="$(cat "$pkg" 2>/dev/null || echo "")"
+  [[ "$content" == *"Product Owner 親自核准"* ]] || { all_manual_gate_wording_ok=false; echo "    (gate $hr missing Manual Gate wording)"; }
+done
+assert_true "25h: commit/push gates retain explicit Manual Gate wording" $all_manual_gate_wording_ok
+
+# 25i: delivery_status wording distinguishes package generation from actual
+# delivery (requirement 8).
+sample_pkg="$TEST_DIR/sprint-25d/round-001/notifications/gate-${gate25_ids[0]}.md"
+assert_contains "25i: delivery_status wording clarifies it is not the actual delivery result" \
+  "delivery_status: pending（Notification Package 產生當下狀態，非實際送達結果" \
+  "$(cat "$sample_pkg" 2>/dev/null || echo "")"
+
+# 25j: Sandboxed Low-Risk Auto-Approval Policy does not apply Level 0 to
+# high-risk/write/commit/push actions (requirement 9).
+policy_doc25="$(cat /home/ivan/AI/docs/development/execution-permission-policy.md 2>/dev/null || echo "")"
+level0_section="$(echo "$policy_doc25" | awk '/### 5\.1 Level 0/,/### 5\.2/')"
+level3_section="$(echo "$policy_doc25" | awk '/### 5\.4 Level 3/,/### 5\.5/')"
+level0_safe=true
+for forbidden in "git add" "git commit" "git push" " rm " " mv " "chmod" "chown" "curl" "wget" "scp" "ssh" "docker"; do
+  [[ "$level0_section" == *"$forbidden"* ]] && { level0_safe=false; echo "    (Level 0 section unexpectedly mentions '$forbidden')"; }
+done
+assert_true "25j-1: Level 0 (auto-approvable) does not list git add/commit/push/rm/mv/chmod/chown/curl/wget/scp/ssh/docker" $level0_safe
+
+level3_complete=true
+for required in "git add" "git commit" "git push" "rm" "mv" "chmod" "chown" "curl" "wget" "scp" "ssh" "docker"; do
+  [[ "$level3_section" == *"$required"* ]] || { level3_complete=false; echo "    (Level 3 section missing '$required')"; }
+done
+assert_true "25j-2: Level 3 (Manual Gate required) lists all high-risk/write commands" $level3_complete
+
+# 25k: the Telegram Gate spec now references the canonical metadata doc
+# instead of duplicating it (avoids drift between two copies).
+spec25="$(cat /home/ivan/AI/docs/development/telegram-po-gate-notification-specification.md 2>/dev/null || echo "")"
+assert_contains "25k: Telegram Gate spec references the canonical metadata artifact" \
+  "docs/development/product-owner-gate-metadata.md" "$spec25"
+
+# 25l: notify-gate CLI usage is documented in the spec.
+assert_contains "25l: Telegram Gate spec documents notify-gate CLI usage" \
+  "notify-gate <gate-id>" "$spec25"
+
+###############################################################################
+# Sprint-016 Must Fix round: current_status_zh + recommended_execution_mode
+###############################################################################
+
+# 25m: every gate's current_status_zh in the canonical metadata doc matches
+# the runtime GATE_STATUS_ZH exactly (Must Fix 1 -- this would fail if the
+# field were missing, or if it drifted from runtime).
+canonical_doc25="$(cat /home/ivan/AI/docs/development/product-owner-gate-metadata.md 2>/dev/null || echo "")"
+all_status_aligned=true
+for gid in "${gate25_ids[@]}"; do
+  runtime_status="$(sed -n "/^    ${gid})\$/,/;;/p" "$BRIDGE" | grep 'GATE_STATUS_ZH=' | sed -E 's/^\s*GATE_STATUS_ZH="(.*)"\s*$/\1/')"
+  if [[ -z "$runtime_status" ]]; then
+    all_status_aligned=false
+    echo "    (could not extract runtime GATE_STATUS_ZH for $gid)"
+    continue
+  fi
+  if [[ "$canonical_doc25" != *"**現況狀態**（current_status_zh）：${runtime_status}"* ]]; then
+    all_status_aligned=false
+    echo "    (canonical doc missing or misaligned current_status_zh for $gid; expected: $runtime_status)"
+  fi
+done
+assert_true "25m: every gate's current_status_zh in the canonical doc matches runtime GATE_STATUS_ZH exactly" $all_status_aligned
+
+# 25n: _gate_validate_metadata() now actually validates recommended_execution_mode
+# (Must Fix 2) -- static source check that a case-statement over
+# $GATE_EXEC_MODE exists inside the function body and rejects unknown values
+# by name, not just assigns/reads the variable elsewhere.
+validate_fn_src="$(sed -n '/^_gate_validate_metadata()/,/^}/p' "$BRIDGE")"
+assert_contains "25n-1: _gate_validate_metadata() contains a case statement over GATE_EXEC_MODE" \
+  'case "$GATE_EXEC_MODE" in' "$validate_fn_src"
+assert_contains "25n-2: _gate_validate_metadata() rejects an invalid recommended_execution_mode by name" \
+  "invalid recommended_execution_mode" "$validate_fn_src"
+
+# 25n-3: the case statement's allow-list covers all 10 values actually used
+# by _gate_resolve_metadata() (the 7 modes + 3 approved N/A values), so a
+# legitimate value is never accidentally rejected.
+resolve_fn_modes="$(grep -oE 'GATE_EXEC_MODE="[^"]*"' "$BRIDGE" | grep -v '^GATE_EXEC_MODE=""$' | sort -u)"
+all_modes_in_validator=true
+while IFS= read -r mode_assignment; do
+  mode_value="${mode_assignment#GATE_EXEC_MODE=}"
+  mode_value="${mode_value%\"}"
+  mode_value="${mode_value#\"}"
+  [[ "$validate_fn_src" == *"\"$mode_value\""* ]] || { all_modes_in_validator=false; echo "    (validator missing allowed mode: $mode_value)"; }
+done <<< "$resolve_fn_modes"
+assert_true "25n-3: validator's allow-list covers every recommended_execution_mode value used by _gate_resolve_metadata()" $all_modes_in_validator
+
+# 25o: a full notify-gate run for every one of the 21 real gates still
+# succeeds with no "Internal error" after both Must Fix 1 and Must Fix 2
+# changes -- proves the stricter validation does not reject any real gate.
+# (Re-uses the artifacts/dir already generated in 25d/e/f above.)
+all_still_pass=true
+for gid in "${gate25_ids[@]}"; do
+  round25_padded="$(printf '%03d' "$(( $(printf '%s\n' "${gate25_ids[@]}" | grep -nx "$gid" | cut -d: -f1) ))")"
+  pkg="$TEST_DIR/sprint-25d/round-${round25_padded}/notifications/gate-${gid}.md"
+  [[ -f "$pkg" ]] || { all_still_pass=false; echo "    (gate $gid package missing after Must Fix changes)"; }
+done
+assert_true "25o: all 21 gates still produce a Notification Package after the Must Fix round (no regression)" $all_still_pass
+
+# 25p: no external service is required by these tests, no Telegram live
+# delivery is attempted, no n8n JSON is touched, and no runtime evidence
+# from this test run leaks outside the isolated TEST_DIR (repository
+# hygiene / test-isolation requirement of the Must Fix handoff).
+assert_true "25p-1: this test run used REVIEWS_OVERRIDE (isolated TEST_DIR), not the real repository reviews/ directory" \
+  "[[ -n \"${REVIEWS_OVERRIDE:-}\" ]] && true || false"
+assert_true "25p-2: NOTIFICATION_ENABLED was never set to true in the Sprint-016 test block (no live Telegram delivery attempted)" \
+  "[[ -z \"${NOTIFICATION_ENABLED:-}\" ]] && true || false"
+
+echo "  (Sprint-013/014 notify and notify-gate tests re-verified above by Test 22/23/24, run unchanged in this same suite: zero regression)"
+
+###############################################################################
 # Sprint-004 E2E compatibility
 ###############################################################################
 echo ""
