@@ -44,6 +44,11 @@ Commands:
                               Parse deterministic markers and produce consensus_report.md.
   finalize                    <sprint-id> <round>
                               Produce final_consensus.md only when Gate Status is PASS.
+  notify                      <sprint-id> <round> <event-type> <artifact-path>
+                              Generate a Notification Package, deduplicate, and optionally deliver
+                              to Telegram (see docs/development/notification-package-specification.md).
+                              Requires PROJECT_ID and PROJECT_NAME env vars. Best-effort: delivery
+                              failure never blocks or fails the underlying Sprint/Review Bridge flow.
 
 Notes:
   - skeleton creates placeholder input artifacts only.
@@ -1304,6 +1309,418 @@ EOF
 }
 
 ###############################################################################
+# Command: notify (Sprint-013 — Generic Telegram Notification Runtime)
+###############################################################################
+#
+# Generic, project-agnostic notification pipeline:
+#   Detect Artifact -> Generate Notification Package -> Hash -> Dedup Key ->
+#   Check History -> Send Telegram -> Write History (append-only)
+#
+# This command is purely additive: it does not read or modify sprint_meta.env,
+# does not call load_meta, and does not touch check/consensus/finalize or any
+# existing gate logic. It never calls Claude, Codex, git commit, or git push.
+
+NOTIFY_ALLOWED_EVENTS=(
+  claude_implementation_done
+  codex_review_done
+  claude_should_fix_done
+  codex_final_review_done
+  git_review_done
+  commit_done
+  push_done
+  retrospective_done
+)
+
+# Notification Recipient is always Product Owner (Sprint-013 Must Fix 2):
+# Telegram must never be used to notify Claude Code or Codex directly, since
+# that would bypass the Product Owner Manual Gate. See
+# docs/development/notification-package-specification.md Section 5.1.
+NOTIFY_NOTIFICATION_RECIPIENT="Product Owner"
+
+# Resolve deterministic per-event metadata: Next Actor (who Product Owner may
+# hand the artifact to next — informational only, never auto-invoked) and the
+# Product-Owner-facing Next Action text. Also doubles as the event whitelist:
+# unknown events fall through to the `*` case and return 1.
+# See docs/development/notification-package-specification.md Section 5.2.
+NOTIFY_NEXT_ACTOR=""
+NOTIFY_NEXT_STEP=""
+_notify_resolve_event_meta() {
+  local event_type="$1"
+  case "$event_type" in
+    claude_implementation_done)
+      NOTIFY_NEXT_ACTOR="Codex"
+      NOTIFY_NEXT_STEP="Product Owner should forward this handoff package to Codex to request an Architecture / Implementation Review."
+      ;;
+    codex_review_done)
+      NOTIFY_NEXT_ACTOR="Product Owner"
+      NOTIFY_NEXT_STEP="Product Owner should read the Codex review and decide whether to forward it to Claude Code for Must Fix / Should Fix items, or close the round."
+      ;;
+    claude_should_fix_done)
+      NOTIFY_NEXT_ACTOR="Codex"
+      NOTIFY_NEXT_STEP="Product Owner should forward this to Codex to confirm the Must Fix / Should Fix resolution and request codex_final_review.md."
+      ;;
+    codex_final_review_done)
+      NOTIFY_NEXT_ACTOR="Product Owner"
+      NOTIFY_NEXT_STEP="Product Owner should review the final result and decide on consensus / next round."
+      ;;
+    git_review_done)
+      NOTIFY_NEXT_ACTOR="Product Owner"
+      NOTIFY_NEXT_STEP="Product Owner should confirm commit scope before approving commit."
+      ;;
+    commit_done)
+      NOTIFY_NEXT_ACTOR="Product Owner"
+      NOTIFY_NEXT_STEP="Product Owner should confirm whether to proceed to push."
+      ;;
+    push_done)
+      NOTIFY_NEXT_ACTOR="Product Owner"
+      NOTIFY_NEXT_STEP="Product Owner should confirm the Sprint can be closed."
+      ;;
+    retrospective_done)
+      NOTIFY_NEXT_ACTOR="Product Owner"
+      NOTIFY_NEXT_STEP="Product Owner should record the Product Owner Decision section."
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  return 0
+}
+
+# Split the file at package_path (the exact, already-written Notification
+# Package artifact) into <=3500-character literal chunks, written to numbered
+# files under out_dir. Reads the file directly (never passes its content
+# through shell variable substitution, avoiding any quoting/escaping risk).
+# Character-based (not byte-based) so multi-byte text (e.g. Chinese) is never
+# split mid-character. Used only so Telegram's message-length limit can be
+# respected while still transmitting the artifact's own text verbatim
+# (Sprint-013 Must Fix 1) — this performs no rewriting, summarizing, or
+# reinterpretation of content.
+_notify_split_for_telegram() {
+  local package_path="$1"
+  local out_dir="$2"
+  python3 - "$package_path" "$out_dir" <<'PY'
+import sys
+package_path, out_dir = sys.argv[1], sys.argv[2]
+with open(package_path, encoding="utf-8") as f:
+    content = f.read()
+CHUNK = 3500
+chunks = [content[i:i + CHUNK] for i in range(0, len(content), CHUNK)] or [""]
+for idx, chunk in enumerate(chunks):
+    with open(f"{out_dir}/chunk-{idx:03d}.txt", "w", encoding="utf-8") as f:
+        f.write(chunk)
+PY
+}
+
+# Append one JSON line to the (project-agnostic) notification history file.
+# Uses python3 for correct JSON construction (the record has 14 fields and
+# free-text content; hand-rolled bash JSON escaping would be error-prone).
+# Never receives TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID as arguments.
+_notify_write_history() {
+  local history_file="$1"; shift
+  python3 - "$history_file" "$@" <<'PY'
+import json
+import sys
+
+(history_file, project_id, project_name, sprint_id, round_id, event_type,
+ artifact_path, artifact_hash, notification_package_path, delivery_channel,
+ delivery_status, deduplication_key, created_at, delivered_at,
+ error_message) = sys.argv[1:16]
+
+record = {
+    "project_id": project_id,
+    "project_name": project_name,
+    "sprint_id": sprint_id,
+    "round_id": round_id,
+    "event_type": event_type,
+    "artifact_path": artifact_path,
+    "artifact_hash": artifact_hash,
+    "notification_package_path": notification_package_path,
+    "delivery_channel": delivery_channel,
+    "delivery_status": delivery_status,
+    "deduplication_key": deduplication_key,
+    "created_at": created_at,
+    "delivered_at": delivered_at or None,
+    "error_message": error_message or None,
+}
+
+with open(history_file, "a", encoding="utf-8") as f:
+    f.write(json.dumps(record, ensure_ascii=False) + "\n")
+PY
+}
+
+# Return 0 (true) if a `delivered` record already exists for this
+# deduplication key. Reads reviews/notification_history.jsonl only; no
+# Database. Malformed lines are skipped rather than aborting the scan.
+_notify_already_delivered() {
+  local history_file="$1"
+  local dedup_key="$2"
+  [[ -f "$history_file" ]] || return 1
+  python3 - "$history_file" "$dedup_key" <<'PY'
+import json
+import sys
+
+history_file, dedup_key = sys.argv[1], sys.argv[2]
+found = False
+with open(history_file, encoding="utf-8") as f:
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if record.get("deduplication_key") == dedup_key and record.get("delivery_status") == "delivered":
+            found = True
+sys.exit(0 if found else 1)
+PY
+}
+
+cmd_notify() {
+  local sprint_id="${1:?Usage: review_bridge.sh notify <sprint-id> <round> <event-type> <artifact-path>}"
+  shift
+  local round="${1:?Usage: review_bridge.sh notify <sprint-id> <round> <event-type> <artifact-path>}"
+  shift
+  local event_type="${1:?Usage: review_bridge.sh notify <sprint-id> <round> <event-type> <artifact-path>}"
+  shift
+  local artifact_path="${1:?Usage: review_bridge.sh notify <sprint-id> <round> <event-type> <artifact-path>}"
+  shift
+
+  parse_dry_run "$@"
+
+  validate_id "$sprint_id" "sprint-id"
+  round="$(validate_round "$round")"
+  local round_id="round-$round"
+
+  if [[ "$artifact_path" == *".."* ]]; then
+    die "Invalid artifact-path: '$artifact_path' (contains forbidden characters)"
+  fi
+
+  if ! _notify_resolve_event_meta "$event_type"; then
+    die "Invalid event_type: '$event_type'. Allowed: ${NOTIFY_ALLOWED_EVENTS[*]}"
+  fi
+
+  local project_id="${PROJECT_ID:-}"
+  local project_name="${PROJECT_NAME:-}"
+  [[ -z "$project_id" ]] && die "PROJECT_ID environment variable is required (no default is assumed)"
+  [[ -z "$project_name" ]] && die "PROJECT_NAME environment variable is required (no default is assumed)"
+
+  local history_file="$REVIEWS_DIR/notification_history.jsonl"
+
+  local abs_artifact_path
+  if [[ "$artifact_path" = /* ]]; then
+    abs_artifact_path="$artifact_path"
+  else
+    abs_artifact_path="$REPO_ROOT/$artifact_path"
+  fi
+
+  local created_at
+  created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  if [[ ! -f "$abs_artifact_path" ]]; then
+    if ! $DRY_RUN; then
+      _notify_write_history "$history_file" \
+        "$project_id" "$project_name" "$sprint_id" "$round_id" "$event_type" \
+        "$artifact_path" "" "" "telegram" "failed" "" "$created_at" "" \
+        "Artifact not found: $artifact_path"
+    fi
+    die "Artifact not found: $artifact_path"
+  fi
+
+  local artifact_hash
+  artifact_hash="$(sha256sum "$abs_artifact_path" | awk '{print $1}')"
+
+  local dedup_key="${project_id}/${sprint_id}/${round_id}/${event_type}/${artifact_path}/${artifact_hash}"
+
+  local notif_dir="$REVIEWS_DIR/$sprint_id/round-$round/notifications"
+  local notif_path="$notif_dir/${event_type}.md"
+
+  if $DRY_RUN; then
+    echo "[dry-run] Would write $notif_path"
+    echo "[dry-run] Deduplication key: $dedup_key"
+    echo "[dry-run] Would check $history_file for an existing 'delivered' record"
+    echo "[dry-run] Would POST to Telegram Bot API if NOTIFICATION_ENABLED=true and config is present"
+    return 0
+  fi
+
+  mkdir -p "$notif_dir"
+
+  # Copyable Handoff Package: framed from Product Owner's perspective (the
+  # recipient), to be forwarded by Product Owner to NOTIFY_NEXT_ACTOR — never
+  # phrased as an instruction addressed directly to that actor (Must Fix 2).
+  local copyable_prompt
+  copyable_prompt="$(cat <<EOF
+請閱讀：
+- ${artifact_path}
+
+Sprint: ${sprint_id}
+Round: ${round_id}
+Event: ${event_type}
+Next Actor（若 Product Owner 決定轉交）: ${NOTIFY_NEXT_ACTOR}
+
+${NOTIFY_NEXT_STEP}
+EOF
+)"
+
+  # Notification Package: the sole content source for delivery (Must Fix 1).
+  # Field set matches docs/development/notification-package-specification.md
+  # Section 3 exactly (17 fields). Delivery Status is recorded here only as
+  # "pending" (the state as of generation time, before any send is
+  # attempted) — the authoritative post-attempt outcome is written to
+  # Notification History below, never mutated back into this file, so the
+  # text actually transmitted to Telegram is never retroactively different
+  # from what is later read from disk.
+  cat > "$notif_path" <<EOF
+# Notification Package
+
+## Project ID
+
+${project_id}
+
+## Project Name
+
+${project_name}
+
+## Sprint ID
+
+${sprint_id}
+
+## Round ID
+
+${round_id}
+
+## Event Type
+
+${event_type}
+
+## Notification Recipient
+
+${NOTIFY_NOTIFICATION_RECIPIENT}
+
+## Next Actor
+
+${NOTIFY_NEXT_ACTOR}
+
+## Source Artifact Path
+
+${artifact_path}
+
+## Artifact Hash
+
+${artifact_hash}
+
+## Deduplication Key
+
+${dedup_key}
+
+## Notification Package Path
+
+${notif_path}
+
+## Delivery Channel
+
+telegram
+
+## Delivery Status
+
+pending
+
+## Created Time
+
+${created_at}
+
+## Product Owner Next Action
+
+${NOTIFY_NEXT_STEP}
+
+## Copyable Handoff Package
+
+${copyable_prompt}
+
+## Delivery Metadata
+
+- Delivery Channel: telegram
+- Deduplication Key: ${dedup_key}
+- Created At: ${created_at}
+EOF
+
+  echo "Written: $notif_path"
+
+  if _notify_already_delivered "$history_file" "$dedup_key"; then
+    _notify_write_history "$history_file" \
+      "$project_id" "$project_name" "$sprint_id" "$round_id" "$event_type" \
+      "$artifact_path" "$artifact_hash" "$notif_path" "telegram" \
+      "skipped_duplicate" "$dedup_key" "$created_at" "" ""
+    echo "skipped_duplicate: this artifact/event/hash combination was already delivered."
+    return 0
+  fi
+
+  local delivery_status delivered_at error_message
+  delivered_at=""
+  error_message=""
+
+  if [[ "${NOTIFICATION_ENABLED:-}" != "true" ]]; then
+    delivery_status="disabled"
+    echo "Telegram delivery disabled (NOTIFICATION_ENABLED is not 'true')."
+  elif [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${TELEGRAM_CHAT_ID:-}" ]]; then
+    delivery_status="disabled"
+    echo "Telegram delivery disabled (TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is not set)."
+  elif ! command -v curl >/dev/null 2>&1; then
+    delivery_status="failed"
+    error_message="curl is not installed"
+    echo "WARNING: curl is not installed; cannot deliver to Telegram." >&2
+  else
+    # Sprint-013 Must Fix 1: send the Notification Package artifact's own
+    # text, unmodified. No separate message is composed. If the artifact
+    # exceeds Telegram's message-length limit, it is split into literal
+    # chunks (never rewritten/summarized) and sent as consecutive messages.
+    local chunk_dir
+    chunk_dir="$(mktemp -d)"
+    _notify_split_for_telegram "$notif_path" "$chunk_dir"
+
+    local all_ok=true
+    local any_attempted=false
+    local chunk_file
+    for chunk_file in "$chunk_dir"/chunk-*.txt; do
+      [[ -f "$chunk_file" ]] || continue
+      any_attempted=true
+      local telegram_url="https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage"
+      local response
+      if response="$(curl -fsS --max-time 5 -X POST "$telegram_url" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text@${chunk_file}" 2>/dev/null)"; then
+        echo "$response" | grep -q '"ok":true' || all_ok=false
+      else
+        all_ok=false
+      fi
+    done
+    rm -rf "$chunk_dir"
+
+    if ! $any_attempted; then
+      delivery_status="failed"
+      error_message="No message chunks were produced from the Notification Package"
+      echo "WARNING: Telegram delivery produced no chunks to send. Continuing without blocking the workflow." >&2
+    elif $all_ok; then
+      delivery_status="delivered"
+      delivered_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      echo "Telegram delivery: delivered (Notification Package artifact sent verbatim)."
+    else
+      delivery_status="failed"
+      error_message="Telegram API request failed for at least one message chunk"
+      echo "WARNING: Telegram API request failed. Continuing without blocking the workflow." >&2
+    fi
+  fi
+
+  _notify_write_history "$history_file" \
+    "$project_id" "$project_name" "$sprint_id" "$round_id" "$event_type" \
+    "$artifact_path" "$artifact_hash" "$notif_path" "telegram" \
+    "$delivery_status" "$dedup_key" "$created_at" "$delivered_at" "$error_message"
+
+  echo "Notification history updated: $history_file (delivery_status=$delivery_status)"
+  return 0
+}
+
+###############################################################################
 # Main dispatcher
 ###############################################################################
 
@@ -1319,5 +1736,6 @@ case "$COMMAND" in
   validate-final-consensus) cmd_validate_final_consensus "$@" ;;
   consensus)             cmd_consensus "$@" ;;
   finalize)              cmd_finalize "$@" ;;
+  notify)                cmd_notify "$@" ;;
   *)                     die_usage "Unknown command: '$COMMAND'." ;;
 esac

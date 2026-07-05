@@ -609,6 +609,310 @@ else
 fi
 
 ###############################################################################
+# Test 22: notify command (Sprint-013 Generic Telegram Notification Runtime)
+###############################################################################
+echo ""
+echo "=== Test 22: notify command ==="
+
+NOTIFY_ARTIFACTS_DIR="$TEST_DIR/notify-artifacts"
+mkdir -p "$NOTIFY_ARTIFACTS_DIR"
+NOTIFY_HISTORY="$TEST_DIR/notification_history.jsonl"
+
+NOTIFY_FAKE_BIN_OK="$TEST_DIR/notify-fake-bin-ok"
+mkdir -p "$NOTIFY_FAKE_BIN_OK"
+cat > "$NOTIFY_FAKE_BIN_OK/curl" <<'STUB'
+#!/usr/bin/env bash
+echo '{"ok":true,"result":{"message_id":1}}'
+exit 0
+STUB
+chmod +x "$NOTIFY_FAKE_BIN_OK/curl"
+
+NOTIFY_FAKE_BIN_FAIL="$TEST_DIR/notify-fake-bin-fail"
+mkdir -p "$NOTIFY_FAKE_BIN_FAIL"
+cat > "$NOTIFY_FAKE_BIN_FAIL/curl" <<'STUB'
+#!/usr/bin/env bash
+exit 7
+STUB
+chmod +x "$NOTIFY_FAKE_BIN_FAIL/curl"
+
+# 22a: Notification Package can be generated; Telegram disabled by default
+# (NOTIFICATION_ENABLED unset) -> delivery_status=disabled, package still written.
+echo "v1" > "$NOTIFY_ARTIFACTS_DIR/a.md"
+output=$(cd "$SCRIPT_DIR" && env -u NOTIFICATION_ENABLED -u TELEGRAM_BOT_TOKEN -u TELEGRAM_CHAT_ID \
+  PROJECT_ID=proj-a PROJECT_NAME="Project A" REVIEWS_OVERRIDE="$TEST_DIR" \
+  bash "$BRIDGE" notify sprint-alpha 001 codex_review_done "$NOTIFY_ARTIFACTS_DIR/a.md" 2>&1)
+ec=$?
+assert_exit_code "notify exits 0 on successful package generation" 0 "$ec"
+assert_contains "notify reports disabled when NOTIFICATION_ENABLED unset" "disabled" "$output"
+[[ -f "$TEST_DIR/sprint-alpha/round-001/notifications/codex_review_done.md" ]] \
+  && { echo "  PASS: Notification Package file created"; ((pass_count++)); } \
+  || { echo "  FAIL: Notification Package file not created"; ((fail_count++)); }
+pkg_content=$(cat "$TEST_DIR/sprint-alpha/round-001/notifications/codex_review_done.md" 2>/dev/null || echo "")
+assert_contains "package includes Project section with generic project_id" "proj-a" "$pkg_content"
+assert_contains "package includes generic project_name" "Project A" "$pkg_content"
+assert_contains "package includes Deduplication Key" "Deduplication Key" "$pkg_content"
+assert_contains "package includes Copyable Handoff Package section" "Copyable Handoff Package" "$pkg_content"
+
+# 22b: Deduplication key is generated and recorded in history.
+assert_contains "history file created" "deduplication_key" "$(cat "$NOTIFY_HISTORY" 2>/dev/null || echo "")"
+
+# 22c: same event/artifact (same hash) is not re-pushed once delivered.
+echo "v1" > "$NOTIFY_ARTIFACTS_DIR/b.md"
+PATH="$NOTIFY_FAKE_BIN_OK:$PATH" PROJECT_ID=proj-c PROJECT_NAME="Project C" \
+  NOTIFICATION_ENABLED=true TELEGRAM_BOT_TOKEN=tok TELEGRAM_CHAT_ID=1 \
+  REVIEWS_OVERRIDE="$TEST_DIR" \
+  bash "$BRIDGE" notify sprint-charlie 001 codex_review_done "$NOTIFY_ARTIFACTS_DIR/b.md" >/dev/null 2>&1
+output=$(PATH="$NOTIFY_FAKE_BIN_OK:$PATH" PROJECT_ID=proj-c PROJECT_NAME="Project C" \
+  NOTIFICATION_ENABLED=true TELEGRAM_BOT_TOKEN=tok TELEGRAM_CHAT_ID=1 \
+  REVIEWS_OVERRIDE="$TEST_DIR" \
+  bash "$BRIDGE" notify sprint-charlie 001 codex_review_done "$NOTIFY_ARTIFACTS_DIR/b.md" 2>&1)
+ec=$?
+assert_exit_code "duplicate notify still exits 0 (not a failure)" 0 "$ec"
+assert_contains "duplicate notify reports skipped_duplicate" "skipped_duplicate" "$output"
+
+# 22d: artifact content change produces a new hash and allows a new push.
+echo "v2-changed" > "$NOTIFY_ARTIFACTS_DIR/b.md"
+output=$(PATH="$NOTIFY_FAKE_BIN_OK:$PATH" PROJECT_ID=proj-c PROJECT_NAME="Project C" \
+  NOTIFICATION_ENABLED=true TELEGRAM_BOT_TOKEN=tok TELEGRAM_CHAT_ID=1 \
+  REVIEWS_OVERRIDE="$TEST_DIR" \
+  bash "$BRIDGE" notify sprint-charlie 001 codex_review_done "$NOTIFY_ARTIFACTS_DIR/b.md" 2>&1)
+assert_contains "changed artifact is delivered again (not skipped)" "delivered" "$output"
+
+# 22e: missing artifact fails safely.
+output=$(cd "$SCRIPT_DIR" && PROJECT_ID=proj-e PROJECT_NAME="Project E" REVIEWS_OVERRIDE="$TEST_DIR" \
+  bash "$BRIDGE" notify sprint-echo 001 codex_review_done "$NOTIFY_ARTIFACTS_DIR/does-not-exist.md" 2>&1)
+ec=$?
+assert_exit_code "missing artifact exits non-zero" 1 "$ec"
+assert_contains "missing artifact prints clear error" "not found" "$output"
+[[ ! -f "$TEST_DIR/sprint-echo/round-001/notifications/codex_review_done.md" ]] \
+  && { echo "  PASS: no package written for missing artifact"; ((pass_count++)); } \
+  || { echo "  FAIL: package unexpectedly written for missing artifact"; ((fail_count++)); }
+
+# 22f: missing Telegram config -> disabled, package still generated, no send.
+echo "v1" > "$NOTIFY_ARTIFACTS_DIR/f.md"
+output=$(cd "$SCRIPT_DIR" && env -u TELEGRAM_BOT_TOKEN -u TELEGRAM_CHAT_ID \
+  PROJECT_ID=proj-f PROJECT_NAME="Project F" NOTIFICATION_ENABLED=true REVIEWS_OVERRIDE="$TEST_DIR" \
+  bash "$BRIDGE" notify sprint-foxtrot 001 codex_review_done "$NOTIFY_ARTIFACTS_DIR/f.md" 2>&1)
+assert_contains "missing Telegram config reports disabled" "disabled" "$output"
+[[ -f "$TEST_DIR/sprint-foxtrot/round-001/notifications/codex_review_done.md" ]] \
+  && { echo "  PASS: package still generated when Telegram config missing"; ((pass_count++)); } \
+  || { echo "  FAIL: package not generated when Telegram config missing"; ((fail_count++)); }
+
+# 22g/22h/22i: generic sprint_id / round_id / project_id / project_name (not
+# hardcoded to sprint-013 / round-001 / ai-workspace).
+echo "v1" > "$NOTIFY_ARTIFACTS_DIR/g.md"
+output=$(cd "$SCRIPT_DIR" && PROJECT_ID=totally-different-project PROJECT_NAME="Totally Different Project" \
+  REVIEWS_OVERRIDE="$TEST_DIR" \
+  bash "$BRIDGE" notify sprint-999 007 push_done "$NOTIFY_ARTIFACTS_DIR/g.md" 2>&1)
+assert_exit_code "arbitrary sprint_id/round_id/project_id all accepted" 0 "$?"
+[[ -f "$TEST_DIR/sprint-999/round-007/notifications/push_done.md" ]] \
+  && { echo "  PASS: generic sprint_id (sprint-999) and round_id (007) both work"; ((pass_count++)); } \
+  || { echo "  FAIL: generic sprint_id/round_id did not produce expected path"; ((fail_count++)); }
+pkg_g=$(cat "$TEST_DIR/sprint-999/round-007/notifications/push_done.md" 2>/dev/null || echo "")
+assert_contains "generic project_id flows into package" "totally-different-project" "$pkg_g"
+assert_contains "generic project_name flows into package" "Totally Different Project" "$pkg_g"
+
+# 22j: invalid event type is rejected (whitelist).
+output=$(cd "$SCRIPT_DIR" && PROJECT_ID=proj-j PROJECT_NAME="Project J" REVIEWS_OVERRIDE="$TEST_DIR" \
+  bash "$BRIDGE" notify sprint-juliet 001 not_a_real_event "$NOTIFY_ARTIFACTS_DIR/a.md" 2>&1)
+ec=$?
+assert_exit_code "unknown event_type exits non-zero" 1 "$ec"
+assert_contains "unknown event_type reports clear error" "Invalid event_type" "$output"
+
+# 22k: notification history is append-only (never overwritten).
+lines_before=$(wc -l < "$NOTIFY_HISTORY")
+echo "v1" > "$NOTIFY_ARTIFACTS_DIR/k.md"
+PROJECT_ID=proj-k PROJECT_NAME="Project K" REVIEWS_OVERRIDE="$TEST_DIR" \
+  bash "$BRIDGE" notify sprint-kilo 001 retrospective_done "$NOTIFY_ARTIFACTS_DIR/k.md" >/dev/null 2>&1
+lines_after=$(wc -l < "$NOTIFY_HISTORY")
+if (( lines_after > lines_before )); then
+  echo "  PASS: notification_history.jsonl grew (append-only, not overwritten)"
+  ((pass_count++))
+else
+  echo "  FAIL: notification_history.jsonl did not grow as expected"
+  ((fail_count++))
+fi
+
+# 22l: TELEGRAM_BOT_TOKEN is never written to the Notification Package,
+# the history file, or stdout/stderr output.
+echo "v1" > "$NOTIFY_ARTIFACTS_DIR/l.md"
+output=$(PATH="$NOTIFY_FAKE_BIN_OK:$PATH" PROJECT_ID=proj-l PROJECT_NAME="Project L" \
+  NOTIFICATION_ENABLED=true TELEGRAM_BOT_TOKEN=SUPER_SECRET_TOKEN_VALUE TELEGRAM_CHAT_ID=1 \
+  REVIEWS_OVERRIDE="$TEST_DIR" \
+  bash "$BRIDGE" notify sprint-lima 001 commit_done "$NOTIFY_ARTIFACTS_DIR/l.md" 2>&1)
+if [[ "$output" != *"SUPER_SECRET_TOKEN_VALUE"* ]] \
+   && [[ "$(cat "$TEST_DIR/sprint-lima/round-001/notifications/commit_done.md")" != *"SUPER_SECRET_TOKEN_VALUE"* ]] \
+   && [[ "$(cat "$NOTIFY_HISTORY")" != *"SUPER_SECRET_TOKEN_VALUE"* ]]; then
+  echo "  PASS: TELEGRAM_BOT_TOKEN never appears in output, package, or history"
+  ((pass_count++))
+else
+  echo "  FAIL: TELEGRAM_BOT_TOKEN leaked somewhere"
+  ((fail_count++))
+fi
+
+# 22m: Telegram API failure -> failed, no infinite retry (single curl call),
+# does not advance workflow, command still exits 0 (package was produced).
+echo "v1" > "$NOTIFY_ARTIFACTS_DIR/m.md"
+output=$(PATH="$NOTIFY_FAKE_BIN_FAIL:$PATH" PROJECT_ID=proj-m PROJECT_NAME="Project M" \
+  NOTIFICATION_ENABLED=true TELEGRAM_BOT_TOKEN=tok TELEGRAM_CHAT_ID=1 \
+  REVIEWS_OVERRIDE="$TEST_DIR" \
+  bash "$BRIDGE" notify sprint-mike 001 git_review_done "$NOTIFY_ARTIFACTS_DIR/m.md" 2>&1)
+ec=$?
+assert_exit_code "Telegram API failure still exits 0 (package was produced)" 0 "$ec"
+assert_contains "Telegram API failure reports failed status" "failed" "$(cat "$NOTIFY_HISTORY")"
+
+# 22n: --dry-run does not write the Notification Package and does not call curl.
+echo "v1" > "$NOTIFY_ARTIFACTS_DIR/n.md"
+output=$(PATH="$NOTIFY_FAKE_BIN_FAIL:$PATH" PROJECT_ID=proj-n PROJECT_NAME="Project N" \
+  NOTIFICATION_ENABLED=true TELEGRAM_BOT_TOKEN=tok TELEGRAM_CHAT_ID=1 \
+  REVIEWS_OVERRIDE="$TEST_DIR" \
+  bash "$BRIDGE" notify sprint-november 001 push_done "$NOTIFY_ARTIFACTS_DIR/n.md" --dry-run 2>&1)
+assert_contains "dry-run shows would-write message" "[dry-run] Would write" "$output"
+[[ ! -f "$TEST_DIR/sprint-november/round-001/notifications/push_done.md" ]] \
+  && { echo "  PASS: dry-run does not create the Notification Package"; ((pass_count++)); } \
+  || { echo "  FAIL: dry-run created the Notification Package"; ((fail_count++)); }
+
+# 22o: notify does not affect existing check/consensus/finalize commands or
+# canonical artifact naming — re-verified by the full suite re-run below
+# (Sprint-004 E2E and Tests 1-21 all still pass in this same run).
+echo "  (existing check/consensus/finalize behavior re-verified by the rest of this test run)"
+
+# 22p: notify contains no git commit / git push / Claude / Codex invocation.
+# Comment-only lines are stripped first so explanatory prose (e.g. "never
+# calls ... git commit") does not produce a false positive; this checks for
+# actual command invocations only.
+notify_src="$(sed -n '/# Command: notify/,/# Main dispatcher/p' "$BRIDGE" | grep -v '^[[:space:]]*#')"
+if [[ "$notify_src" != *"git commit"* && "$notify_src" != *"git push"* ]]; then
+  echo "  PASS: notify command source contains no git commit / git push"
+  ((pass_count++))
+else
+  echo "  FAIL: notify command source contains git commit/push"
+  ((fail_count++))
+fi
+if [[ "$notify_src" != *"api.anthropic.com"* && "$notify_src" != *"openai.com"* ]]; then
+  echo "  PASS: notify command source calls no Claude/Codex API"
+  ((pass_count++))
+else
+  echo "  FAIL: notify command source unexpectedly references an AI API"
+  ((fail_count++))
+fi
+
+###############################################################################
+# Test 23: Sprint-013 Codex Review Must Fix verification
+###############################################################################
+echo ""
+echo "=== Test 23: Must Fix verification (artifact-first Telegram, recipient/actor split, SSOT field contract) ==="
+
+NOTIFY23_ARTIFACTS="$TEST_DIR/notify23-artifacts"
+mkdir -p "$NOTIFY23_ARTIFACTS"
+NOTIFY23_HISTORY="$TEST_DIR/notification_history.jsonl"
+
+# Fake curl that captures the exact file content passed via --data-urlencode
+# text@<file> (Must Fix 1 delivery mechanism) into CAPTURED_CONTENT_FILE
+# *before* cmd_notify cleans up its temp chunk directory.
+NOTIFY23_FAKE_BIN="$TEST_DIR/notify23-fake-bin"
+mkdir -p "$NOTIFY23_FAKE_BIN"
+cat > "$NOTIFY23_FAKE_BIN/curl" <<'STUB'
+#!/usr/bin/env bash
+for a in "$@"; do
+  case "$a" in
+    text@*) cp "${a#text@}" "$CAPTURED_CONTENT_FILE" ;;
+  esac
+done
+echo '{"ok":true}'
+exit 0
+STUB
+chmod +x "$NOTIFY23_FAKE_BIN/curl"
+
+# 23a/23b: Telegram receives the Notification Package artifact content
+# unmodified — no separately composed message_text exists.
+echo "content-23a" > "$NOTIFY23_ARTIFACTS/a.md"
+NOTIFY23_CAPTURED="$TEST_DIR/notify23-captured.txt"
+rm -f "$NOTIFY23_CAPTURED"
+PATH="$NOTIFY23_FAKE_BIN:$PATH" CAPTURED_CONTENT_FILE="$NOTIFY23_CAPTURED" \
+  PROJECT_ID=proj23a PROJECT_NAME="Project 23A" NOTIFICATION_ENABLED=true \
+  TELEGRAM_BOT_TOKEN=tok TELEGRAM_CHAT_ID=1 REVIEWS_OVERRIDE="$TEST_DIR" \
+  bash "$BRIDGE" notify sprint-23a 001 codex_review_done "$NOTIFY23_ARTIFACTS/a.md" >/dev/null 2>&1
+pkg_23a="$TEST_DIR/sprint-23a/round-001/notifications/codex_review_done.md"
+if [[ -f "$NOTIFY23_CAPTURED" && -f "$pkg_23a" ]] && diff -q "$NOTIFY23_CAPTURED" "$pkg_23a" >/dev/null 2>&1; then
+  echo "  PASS: Telegram receives the Notification Package artifact content byte-for-byte (Must Fix 1)"
+  ((pass_count++))
+else
+  echo "  FAIL: Telegram content does not match the Notification Package artifact"
+  ((fail_count++))
+fi
+
+# 23c: notification_recipient is always Product Owner, for every event type.
+# sprint_id must stay hyphen-only (validate_id rejects underscores), so a
+# fixed sprint_id is reused with a distinct round number per event instead of
+# embedding the event name in the sprint_id.
+echo "content-23c" > "$NOTIFY23_ARTIFACTS/c.md"
+all_recipient_ok=true
+round_num=1
+for evt in claude_implementation_done codex_review_done claude_should_fix_done \
+           codex_final_review_done git_review_done commit_done push_done retrospective_done; do
+  round_padded="$(printf '%03d' "$round_num")"
+  PROJECT_ID=proj23c PROJECT_NAME="Project 23C" REVIEWS_OVERRIDE="$TEST_DIR" \
+    bash "$BRIDGE" notify sprint-23c "$round_num" "$evt" "$NOTIFY23_ARTIFACTS/c.md" >/dev/null 2>&1
+  pkg="$TEST_DIR/sprint-23c/round-$round_padded/notifications/${evt}.md"
+  recipient_line="$(awk '/^## Notification Recipient/{getline; getline; print; exit}' "$pkg" 2>/dev/null)"
+  if [[ "$recipient_line" != "Product Owner" ]]; then
+    all_recipient_ok=false
+    echo "    (event $evt has Notification Recipient='$recipient_line', expected 'Product Owner')"
+  fi
+  if [[ "$evt" == "claude_implementation_done" ]]; then
+    pkg_claude_impl="$pkg"
+  fi
+  ((round_num++))
+done
+if $all_recipient_ok; then
+  echo "  PASS: notification_recipient is Product Owner for all 8 event types (Must Fix 2)"
+  ((pass_count++))
+else
+  echo "  FAIL: notification_recipient was not Product Owner for at least one event type"
+  ((fail_count++))
+fi
+
+# 23d: next_actor is a distinct field from notification_recipient, and is not
+# always the same value (proving the two are genuinely separate concepts,
+# not just two labels for one field). pkg_claude_impl was captured inside the
+# 23c loop above.
+assert_contains "package has a distinct 'Next Actor' section" "## Next Actor" "$(cat "$pkg_claude_impl" 2>/dev/null || echo "")"
+next_actor_claude_impl="$(awk '/^## Next Actor/{getline; getline; print; exit}' "$pkg_claude_impl" 2>/dev/null)"
+recipient_claude_impl="$(awk '/^## Notification Recipient/{getline; getline; print; exit}' "$pkg_claude_impl" 2>/dev/null)"
+if [[ "$next_actor_claude_impl" == "Codex" && "$recipient_claude_impl" == "Product Owner" && "$next_actor_claude_impl" != "$recipient_claude_impl" ]]; then
+  echo "  PASS: next_actor (Codex) and notification_recipient (Product Owner) are independently represented"
+  ((pass_count++))
+else
+  echo "  FAIL: next_actor / notification_recipient not correctly separated for claude_implementation_done"
+  ((fail_count++))
+fi
+
+# 23e: generated package contains all 17 SSOT-required field headers.
+pkg_content_23e="$(cat "$pkg_23a" 2>/dev/null || echo "")"
+for field in "Project ID" "Project Name" "Sprint ID" "Round ID" "Event Type" \
+             "Notification Recipient" "Next Actor" "Source Artifact Path" \
+             "Artifact Hash" "Deduplication Key" "Notification Package Path" \
+             "Delivery Channel" "Delivery Status" "Created Time" \
+             "Product Owner Next Action" "Copyable Handoff Package" "Delivery Metadata"; do
+  assert_contains "package includes required SSOT field: $field" "## $field" "$pkg_content_23e"
+done
+
+# 23f: the 8 event types are identical between the SSOT specification
+# document and the notify runtime's whitelist (no drift between the two).
+spec_events="$(sed -n '/^## 2. Notification Events/,/^## 3. Required Fields/p' /home/ivan/AI/docs/development/notification-package-specification.md | grep -oE '.[a-z_]+_done.' | tr -d '`' | sort -u)"
+code_events="$(sed -n '/^NOTIFY_ALLOWED_EVENTS=/,/^)/p' "$BRIDGE" | grep -oE '^  [a-z_]+_done' | tr -d ' ' | sort -u)"
+if [[ "$spec_events" == "$code_events" ]]; then
+  echo "  PASS: event whitelist is identical between the SSOT specification and the notify runtime"
+  ((pass_count++))
+else
+  echo "  FAIL: event whitelist differs between spec and runtime"
+  echo "    spec:   $(echo "$spec_events" | tr '\n' ' ')"
+  echo "    runtime: $(echo "$code_events" | tr '\n' ' ')"
+  ((fail_count++))
+fi
+
+###############################################################################
 # Sprint-004 E2E compatibility
 ###############################################################################
 echo ""
