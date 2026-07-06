@@ -517,6 +517,75 @@ _array_contains() {
   return 1
 }
 
+# Sprint-017: the full, standardized reading list that every formal
+# Handoff Package must open with (Full Reading List Standardization). Never
+# a shortened subset. See docs/development/consensus-workflow.md's Handoff
+# Package Standard section. Kept as one function so both handoff writers
+# below render identical text.
+_full_reading_list_zh() {
+  cat <<'EOF'
+請閱讀：
+
+- PROJECT_BOOTSTRAP.md
+- AGENTS.md
+- GPT.md
+- CLAUDE.md
+- CODEX.md
+- docs/development/development-workflow.md
+- docs/development/consensus-workflow.md
+- docs/development/n8n-claude-done-notification.md
+- docs/development/n8n-codex-review-done-notification.md
+- scripts/review_bridge.sh
+
+若上述文件不存在，請在 report 中記錄為 Missing Context，不要自行建立或補寫。
+EOF
+}
+
+# Sprint-017: render the "Telegram Notification" block every formal Handoff
+# Package must include. gate_id must be one of the 21 canonical gate_ids in
+# docs/development/product-owner-gate-metadata.md -- never a placeholder.
+# This function only renders text; it never calls `notify-gate` itself and
+# never sends anything to Telegram (see notify-gate Execution Policy in
+# docs/development/telegram-po-gate-notification-specification.md: only
+# Product Owner may decide to run notify-gate).
+#
+# Sprint-017 Must Fix (Product Owner Validation blocked): a Telegram
+# Notification block that only *describes* a notification, without giving
+# Product Owner the literal command to run, is not actionable -- nothing
+# ever gets sent, no matter how the fields read. This block therefore always
+# includes the exact `notify-gate` invocation (with the bare numeric round,
+# not the "round-NNN" display form `notify-gate` would reject) and an
+# explicit "Product Owner Action Required" line, so there is no default path
+# that leaves Product Owner without a runnable command.
+#
+# `round_id` here is the "round-NNN" display form used elsewhere in the
+# Handoff Package; the bare numeric round required by the `notify-gate` CLI
+# is derived from it, never re-typed by hand, so the two can never drift.
+_telegram_notification_block() {
+  local gate_id="$1" sprint_id="$2" round_id="$3" artifact_path="$4"
+  local bare_round="${round_id#round-}"
+  # Quoted defensively: PROJECT_NAME in particular is very likely to contain
+  # spaces (e.g. "AI Workspace"), and an unquoted value here would silently
+  # break the copy-pasted command for Product Owner (the shell would treat
+  # the second word as a stray extra argument instead of part of the value).
+  local project_id_hint="\"${PROJECT_ID:-<PROJECT_ID>}\""
+  local project_name_hint="\"${PROJECT_NAME:-<PROJECT_NAME>}\""
+  local artifact_path_quoted="\"$artifact_path\""
+  cat <<EOF
+Telegram Notification:
+
+- Should notify Product Owner: YES
+- gate_id: $gate_id
+- sprint_id: $sprint_id
+- round_id: $round_id
+- artifact_path: $artifact_path
+- Expected Telegram result: Product Owner 會在 Telegram 收到這個 Gate 的正式通知與可複製 Handoff Package（目前尚未送出；只有 Product Owner 親自執行下方指令後才會實際送出，見 docs/development/telegram-po-gate-notification-specification.md 第 19 節）。
+- notify-gate command (Product Owner 手動執行，Claude Code / Codex 不得代為執行):
+  PROJECT_ID=$project_id_hint PROJECT_NAME=$project_name_hint ./scripts/review_bridge.sh notify-gate $gate_id $sprint_id $bare_round $artifact_path_quoted
+- Product Owner Action Required: 若要讓這個 Gate 收到正式 Telegram 通知，請自行複製上方指令並在終端機執行（視需要把 <PROJECT_ID>/<PROJECT_NAME> 換成實際值）；在你執行之前，這仍然只是聊天/檔案中的手動交接，不算正式 Telegram Gate Notification 完成。
+EOF
+}
+
 # Render the reference line for one artifact: the real relative path if it is
 # in ready[], otherwise an explicit PLACEHOLDER line (never a silently wrong
 # or fabricated reference).
@@ -550,6 +619,12 @@ write_handoff_package_claude_to_codex() {
   arch_ref="$(_handoff_ref "$sprint_id" "$round" "$arch_file" "${ready_arr[@]}")"
   claude_ref="$(_handoff_ref "$sprint_id" "$round" "claude_report.md" "${ready_arr[@]}")"
 
+  local full_reading_list
+  full_reading_list="$(_full_reading_list_zh)"
+
+  local telegram_block
+  telegram_block="$(_telegram_notification_block "claude_implementation_report_acceptance" "$sprint_id" "round-$round" "reviews/$sprint_id/round-$round/claude_report.md")"
+
   cat > "$round_dir/handoff_package.md" <<EOF
 # Handoff Package
 
@@ -567,9 +642,7 @@ Claude Implementation Completed
 
 ## 4. Required Reading
 
-- PROJECT_BOOTSTRAP.md
-- docs/development/consensus-workflow.md
-- scripts/review_bridge.sh
+$full_reading_list
 - $arch_ref
 - $claude_ref
 
@@ -599,11 +672,7 @@ Claude Implementation Completed
 
 ## 8. Copyable Prompt
 
-請閱讀：
-
-- PROJECT_BOOTSTRAP.md
-- docs/development/consensus-workflow.md
-- scripts/review_bridge.sh
+$full_reading_list
 - $arch_ref
 - $claude_ref
 
@@ -635,6 +704,10 @@ reviews/$sprint_id/round-$round/codex_review.md
 - 不 commit。
 - 不 push。
 - 只允許更新 reviews/$sprint_id/round-$round/codex_review.md。
+
+## 9. Telegram Notification
+
+$telegram_block
 EOF
 }
 
@@ -655,6 +728,12 @@ write_handoff_package_codex_to_claude() {
   claude_ref="$(_handoff_ref "$sprint_id" "$round" "claude_report.md" "${ready_arr[@]}")"
   codex_ref="$(_handoff_ref "$sprint_id" "$round" "codex_review.md" "${ready_arr[@]}")"
 
+  local full_reading_list
+  full_reading_list="$(_full_reading_list_zh)"
+
+  local telegram_block
+  telegram_block="$(_telegram_notification_block "codex_review_result_decision" "$sprint_id" "round-$round" "reviews/$sprint_id/round-$round/codex_review.md")"
+
   cat > "$round_dir/handoff_package.md" <<EOF
 # Handoff Package
 
@@ -672,9 +751,7 @@ Codex Review Completed
 
 ## 4. Required Reading
 
-- PROJECT_BOOTSTRAP.md
-- docs/development/consensus-workflow.md
-- scripts/review_bridge.sh
+$full_reading_list
 - $arch_ref
 - $claude_ref
 - $codex_ref
@@ -704,11 +781,7 @@ Codex Review Completed
 
 ## 8. Copyable Prompt
 
-請閱讀：
-
-- PROJECT_BOOTSTRAP.md
-- docs/development/consensus-workflow.md
-- scripts/review_bridge.sh
+$full_reading_list
 - $arch_ref
 - $claude_ref
 - $codex_ref
@@ -729,6 +802,10 @@ Codex Review Completed
 - 不擴大 Scope。
 - 不修改 codex_review.md 未提及的項目。
 - 不 commit。
+
+## 9. Telegram Notification
+
+$telegram_block
 EOF
 }
 
@@ -2075,15 +2152,71 @@ with open(history_file, "a", encoding="utf-8") as f:
 PY
 }
 
+# Sprint-017 Must Fix Round 7: parse the "Target AI" declared by a Next AI
+# Handoff Package's own content (the Sprint-010 convention, e.g. a line
+# containing "Target AI" followed by the actor name on the next non-blank
+# line, such as "## 1. Target AI\n\nCodex"). Returns empty if no such
+# declaration is found -- the caller is responsible for treating that as a
+# hard failure rather than guessing. Pure text parsing; no side effects.
+_notify_gate_extract_target_ai() {
+  local content="$1"
+  local target
+  target="$(printf '%s\n' "$content" | awk '
+    /[Tt]arget AI/ { found=1; next }
+    found && NF { print; exit }
+  ')"
+  printf '%s' "$target" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
+}
+
+# Sprint-017 notify-gate Execution Policy (see
+# docs/development/telegram-po-gate-notification-specification.md): cmd_notify_gate
+# is only ever invoked by an explicit human CLI command (`review_bridge.sh
+# notify-gate ...`). No function in this file calls cmd_notify_gate
+# programmatically, and no Handoff Package generator (write_handoff_package_*
+# above) triggers it either -- they only render a "Telegram Notification"
+# text block describing what *could* be sent; actually running notify-gate
+# remains a separate, deliberate Product Owner decision every time.
 cmd_notify_gate() {
-  local gate_id="${1:?Usage: review_bridge.sh notify-gate <gate-id> <sprint-id> <round> <artifact-path>}"
+  local usage_msg="Usage: review_bridge.sh notify-gate <gate-id> <sprint-id> <round> <artifact-path> [summary-path] [next-handoff-path]"
+  local gate_id="${1:?$usage_msg}"
   shift
-  local sprint_id="${1:?Usage: review_bridge.sh notify-gate <gate-id> <sprint-id> <round> <artifact-path>}"
+  local sprint_id="${1:?$usage_msg}"
   shift
-  local round="${1:?Usage: review_bridge.sh notify-gate <gate-id> <sprint-id> <round> <artifact-path>}"
+  local round="${1:?$usage_msg}"
   shift
-  local artifact_path="${1:?Usage: review_bridge.sh notify-gate <gate-id> <sprint-id> <round> <artifact-path>}"
+  local artifact_path="${1:?$usage_msg}"
   shift
+
+  # Sprint-017 Must Fix Round 4: optional 5th positional argument, a path to
+  # a Traditional-Chinese Product Owner Summary artifact. When given, its
+  # content is inlined verbatim, in full, BEFORE the raw artifact content
+  # (see docs/development/telegram-po-gate-notification-specification.md
+  # Section 21) -- so Product Owner can understand the decision from the
+  # summary alone without reading the (often English, Codex-authored) raw
+  # artifact. Omitting it preserves the exact pre-existing behavior
+  # (backward compatible: no summary section is rendered at all).
+  local summary_path=""
+  if [[ $# -gt 0 && "$1" != --* ]]; then
+    summary_path="$1"
+    shift
+  fi
+
+  # Sprint-017 Must Fix Round 5: optional 6th positional argument, a path to
+  # a "Next AI Handoff Package" artifact -- a copy-pasteable instruction for
+  # whichever AI actor (Claude Code or Codex) should act after Product Owner
+  # approves this Gate. When given, its content is inlined under its own
+  # "🤖 Next AI Handoff Package" heading (see
+  # docs/development/telegram-po-gate-notification-specification.md Section
+  # 22) so Product Owner can copy it straight out of Telegram without
+  # returning to ChatGPT. Like summary_path, this is authored separately
+  # (cmd_notify_gate is generic, cross-Sprint infrastructure and cannot
+  # itself know a specific round's task objective, review target, or
+  # allowed/prohibited files). Omitting it preserves exact prior behavior.
+  local next_handoff_path=""
+  if [[ $# -gt 0 && "$1" != --* ]]; then
+    next_handoff_path="$1"
+    shift
+  fi
 
   parse_dry_run "$@"
 
@@ -2104,6 +2237,28 @@ cmd_notify_gate() {
   local project_name="${PROJECT_NAME:-}"
   [[ -z "$project_id" ]] && die "PROJECT_ID environment variable is required (no default is assumed)"
   [[ -z "$project_name" ]] && die "PROJECT_NAME environment variable is required (no default is assumed)"
+
+  # Sprint-017 Must Fix Round 6 (Telegram Content Mode / Copyability
+  # Improvement): TELEGRAM_CONTENT_MODE controls how much is inlined into
+  # the Telegram-bound Notification Package. Default is "handoff" -- full
+  # raw artifact evidence is opt-in only (TELEGRAM_CONTENT_MODE=full),
+  # because Product Owner reported that always-inline raw evidence (Round
+  # 3-5 behavior) made the actually-copyable Next AI Handoff Package hard
+  # to use on a phone once split across many Telegram messages. See
+  # docs/development/telegram-po-gate-notification-specification.md
+  # Section 23.
+  #
+  #   summary  - Product Owner Summary + Decision Options + Evidence
+  #              Reference. No Next AI Handoff Package, no raw content.
+  #   handoff  - summary's sections + Next AI Handoff Package (if given).
+  #              No raw content. THIS IS THE DEFAULT.
+  #   full     - handoff's sections + full inline Raw Artifact Evidence
+  #              (opt-in only).
+  local content_mode="${TELEGRAM_CONTENT_MODE:-handoff}"
+  case "$content_mode" in
+    summary|handoff|full) ;;
+    *) die "Invalid TELEGRAM_CONTENT_MODE: '$content_mode' (must be summary, handoff, or full)" ;;
+  esac
 
   local history_file="$REVIEWS_DIR/notification_history.jsonl"
 
@@ -2127,6 +2282,26 @@ cmd_notify_gate() {
     die "Artifact not found: $artifact_path"
   fi
 
+  local abs_summary_path=""
+  if [[ -n "$summary_path" ]]; then
+    if [[ "$summary_path" = /* ]]; then
+      abs_summary_path="$summary_path"
+    else
+      abs_summary_path="$REPO_ROOT/$summary_path"
+    fi
+    [[ -f "$abs_summary_path" ]] || die "Summary artifact not found: $summary_path"
+  fi
+
+  local abs_next_handoff_path=""
+  if [[ -n "$next_handoff_path" ]]; then
+    if [[ "$next_handoff_path" = /* ]]; then
+      abs_next_handoff_path="$next_handoff_path"
+    else
+      abs_next_handoff_path="$REPO_ROOT/$next_handoff_path"
+    fi
+    [[ -f "$abs_next_handoff_path" ]] || die "Next AI Handoff Package artifact not found: $next_handoff_path"
+  fi
+
   local notif_dir="$REVIEWS_DIR/$sprint_id/round-$round/notifications"
   local notif_path="$notif_dir/gate-${gate_id}.md"
 
@@ -2144,11 +2319,190 @@ cmd_notify_gate() {
 
   # Handoff Package: an independently copyable block (Section 11 of the Gate
   # spec). Never mixed with Delivery Metadata.
-  local handoff_package
-  handoff_package="$(cat <<EOF
-請閱讀：
-- ${artifact_path}
+  #
+  # Sprint-017 Must Fix Round 3 (Product Owner Validation blocked a second
+  # time): a bare "請閱讀：- <path>" reference is not sufficient -- Product
+  # Owner must not have to leave Telegram and open the repository to read
+  # the artifact. The artifact's own content is therefore inlined here
+  # verbatim (Artifact First: this is a direct read of the same file
+  # already referenced, not a re-summarized or re-composed copy), delimited
+  # by explicit BEGIN/END markers so it stays visually distinct from the
+  # surrounding Handoff Package fields even after Telegram splitting.
+  #
+  # Long-content chunking: this whole Notification Package (including the
+  # inlined content below) is still sent through the existing
+  # _notify_split_for_telegram character-based chunker (see the Telegram
+  # delivery step further down in this function), which already splits
+  # strictly in order and sends chunks as consecutive Telegram messages --
+  # so ordering is preserved by construction. No re-chunking logic is
+  # needed here; inlining the content just makes it part of what gets
+  # chunked. See docs/development/telegram-po-gate-notification-specification.md
+  # Section 20 for the documented behavior and its accepted limitation (a
+  # very long artifact may be split mid-line across message boundaries,
+  # but never reordered or summarized).
+  # Sprint-017 Must Fix Round 4: when a summary_path is given, its content
+  # (a Traditional-Chinese Product Owner Summary, authored separately from
+  # this generic function -- see docs/development/telegram-po-gate-notification-specification.md
+  # Section 21 for the required fields) is inlined verbatim, in full, under
+  # its own "🇹🇼 Product Owner Summary" heading. When summary_path is
+  # omitted, this section is not rendered at all -- exact prior behavior.
+  # Present in every content_mode (summary/handoff/full).
+  local po_summary_section=""
+  if [[ -n "$abs_summary_path" ]]; then
+    local po_summary_content
+    po_summary_content="$(cat "$abs_summary_path")"
+    po_summary_section="$(cat <<EOF
 
+🇹🇼 Product Owner Summary（繁體中文摘要，請先讀這裡）
+${po_summary_content}
+EOF
+)"
+  fi
+
+  # Sprint-017 Must Fix Round 5: when a next_handoff_path is given, its
+  # content (a copy-pasteable Handoff Package for whichever AI actor should
+  # act after Product Owner approves this Gate -- see
+  # docs/development/telegram-po-gate-notification-specification.md Section
+  # 22 for the required content) is inlined under its own "🤖 Next AI
+  # Handoff Package" heading, so Product Owner can copy it straight out of
+  # Telegram without returning to ChatGPT. When next_handoff_path is
+  # omitted, this section is not rendered at all -- exact prior behavior.
+  #
+  # Deliberately NOT labeled "for ${GATE_NEXT_ACTOR}": GATE_NEXT_ACTOR is
+  # the canonical metadata value for this Gate (often "Product Owner"
+  # itself, e.g. for product_owner_validation_approval, since the immediate
+  # next actor is conceptually Product Owner's own next decision), but the
+  # AI actor a specific Next AI Handoff Package actually targets (e.g.
+  # Codex, for Codex Git Review) can be a different, more specific actor a
+  # few steps ahead. The handoff content itself states its true target
+  # (Sprint-010's "## 1. Target AI" convention), so the heading here stays
+  # generic rather than asserting a name that could be wrong.
+  #
+  # Sprint-017 Must Fix Round 6: this section is now also gated on
+  # content_mode -- it is rendered in "handoff" (the default) and "full"
+  # modes, but suppressed in "summary" mode, since summary mode is only
+  # meant to convey the decision, not hand off the next task.
+  local next_handoff_section=""
+  local next_handoff_copy_message=""
+  if [[ -n "$abs_next_handoff_path" && "$content_mode" != "summary" ]]; then
+    local next_handoff_content
+    next_handoff_content="$(cat "$abs_next_handoff_path")"
+    next_handoff_section="$(cat <<EOF
+
+🤖 Next AI Handoff Package（可直接複製；實際目標 AI 執行者請見下方內容的 Target AI）
+---
+${next_handoff_content}
+---
+EOF
+)"
+
+    # Sprint-017 Must Fix Round 7 (AI Handoff Standalone Message / Copy
+    # Boundary UX Improvement): Product Owner reported that even after
+    # Round 6 stopped inlining full raw evidence, the Next AI Handoff
+    # Package could still end up sharing one Telegram message with Evidence
+    # Reference / Delivery Metadata / other noise whenever the whole
+    # Notification Package got character-chunked -- Product Owner had to
+    # visually figure out where the actual AI instruction started and
+    # ended before copying it. `next_handoff_copy_message` is therefore
+    # built here as a *standalone* message body, sent as its own,
+    # completely separate Telegram message (see the delivery step further
+    # down): it contains nothing except a fixed copy-boundary marker and
+    # the next_handoff_path content, verbatim (Artifact First: a direct
+    # read of the same file already referenced, never re-composed).
+    #
+    # Target AI is parsed out of the handoff content's own "Target AI"
+    # declaration (the Sprint-010 convention, e.g. "## 1. Target AI\n\nCodex")
+    # rather than assumed from GATE_NEXT_ACTOR, for the same reason Round 5
+    # avoided labeling the heading with GATE_NEXT_ACTOR: the real AI actor a
+    # specific Next AI Handoff Package targets can differ from this Gate's
+    # canonical next_actor metadata. A handoff file with no parseable
+    # Target AI is rejected -- Sprint-017 Must Fix Round 7 makes this
+    # declaration a hard requirement, not a best-effort guess.
+    local next_handoff_target_ai
+    next_handoff_target_ai="$(_notify_gate_extract_target_ai "$next_handoff_content")"
+    if [[ -z "$next_handoff_target_ai" ]]; then
+      die "next-handoff-path '$next_handoff_path' does not declare a 'Target AI' (e.g. '## 1. Target AI' followed by the actor name on its own line) -- required so the copy-boundary marker can name the correct actor"
+    fi
+    local next_handoff_target_ai_upper
+    next_handoff_target_ai_upper="$(printf '%s' "$next_handoff_target_ai" | tr '[:lower:]' '[:upper:]')"
+
+    next_handoff_copy_message="$(cat <<EOF
+===== BEGIN COPY TO ${next_handoff_target_ai_upper} =====
+${next_handoff_content}
+===== END COPY TO ${next_handoff_target_ai_upper} =====
+EOF
+)"
+
+    # Product Owner's explicit requirement: this must be ONE complete,
+    # uninterrupted Telegram message -- never silently split into PART
+    # 1/2. Fail loudly instead, telling the caller to shorten the source
+    # file. The threshold matches the conservative per-chunk budget
+    # _notify_split_for_telegram already uses elsewhere in this file
+    # (3500 characters, safely under Telegram's real ~4096-character
+    # message limit).
+    local next_handoff_copy_message_len="${#next_handoff_copy_message}"
+    local -r NOTIFY_GATE_MAX_SINGLE_MESSAGE_CHARS=3500
+    if (( next_handoff_copy_message_len > NOTIFY_GATE_MAX_SINGLE_MESSAGE_CHARS )); then
+      die "Next AI Handoff Package '$next_handoff_path' is too long to send as a single, uninterrupted Telegram message (${next_handoff_copy_message_len} chars, including the copy-boundary markers, exceeds the ${NOTIFY_GATE_MAX_SINGLE_MESSAGE_CHARS}-char safe limit). Shorten the handoff content so Product Owner can copy it as one complete message; do not rely on it being silently split."
+    fi
+  fi
+
+  # Sprint-017 Must Fix Round 6: Evidence Reference lists the paths to every
+  # artifact this Notification Package refers to, WITHOUT inlining their
+  # content -- present in all 3 content modes, so Product Owner always
+  # knows where the underlying evidence lives even when it isn't inlined.
+  # Built only from generically-known parameters (this function's own
+  # arguments and the fixed history file path); it does not invent
+  # Sprint-specific paths (e.g. a coverage report) it was never told about.
+  local evidence_reference_section
+  evidence_reference_section="$(cat <<EOF
+
+📎 Evidence Reference
+- Source Artifact: ${artifact_path}
+EOF
+)"
+  if [[ -n "$summary_path" ]]; then
+    evidence_reference_section="${evidence_reference_section}
+- Product Owner Summary: ${summary_path}"
+  fi
+  if [[ -n "$next_handoff_path" ]]; then
+    evidence_reference_section="${evidence_reference_section}
+- Next AI Handoff Package: ${next_handoff_path}"
+  fi
+  evidence_reference_section="${evidence_reference_section}
+- Notification History: reviews/notification_history.jsonl"
+
+  # Sprint-017 Must Fix Round 6: full inline Raw Artifact Evidence is now
+  # opt-in only (TELEGRAM_CONTENT_MODE=full). Rounds 3-5 always inlined it,
+  # which Product Owner reported made the actually-copyable Next AI Handoff
+  # Package hard to use once a long artifact split the message into many
+  # Telegram messages. In the default "handoff" mode (and in "summary"
+  # mode), only the Evidence Reference path is shown; the artifact's real
+  # content is read (and Artifact-First-inlined verbatim, delimited by
+  # explicit BEGIN/END markers, chunked in order by the existing
+  # _notify_split_for_telegram -- unchanged from Round 3) only when
+  # content_mode is "full".
+  local raw_evidence_section=""
+  if [[ "$content_mode" == "full" ]]; then
+    local artifact_content
+    artifact_content="$(cat "$abs_artifact_path")"
+    raw_evidence_section="$(cat <<EOF
+
+📄 Raw Artifact Evidence（完整原文，內容可能很長）
+===== BEGIN ARTIFACT CONTENT (${artifact_path}) =====
+${artifact_content}
+===== END ARTIFACT CONTENT =====
+EOF
+)"
+  fi
+
+  # Sprint-017 Must Fix Round 6/7: decision_options_zh is its own variable
+  # (not inlined directly into handoff_package) so it can be reused
+  # unmodified when building the section-aware Telegram message groups
+  # further down, without re-parsing handoff_package's combined text.
+  local decision_options_zh
+  decision_options_zh="$(cat <<EOF
+✅ Product Owner Decision Options
 Sprint: ${sprint_id}
 Round: ${round_id}
 Gate: ${gate_id}
@@ -2158,13 +2512,38 @@ ${GATE_PO_ACTION_ZH}
 EOF
 )"
 
-  # The Notification Package IS the rendered Traditional-Chinese Telegram
-  # layout (Section 8 of docs/development/telegram-po-gate-notification-specification.md):
-  # no separate data structure is kept and re-rendered later (Artifact
-  # First). Delivery Status is always "pending" at generation time; the
-  # authoritative outcome is recorded only in Notification History.
+  # Sprint-017 Must Fix Round 6: fixed section order for maximum
+  # copyability -- Product Owner Summary -> Product Owner Decision Options
+  # -> Next AI Handoff Package -> Evidence Reference -> (full mode only)
+  # Raw Artifact Evidence. The copyable Next AI Handoff Package is always
+  # kept as one contiguous block with nothing long inserted before or
+  # inside it; only Evidence Reference (short, path-only) sits between it
+  # and the optional long raw content, which is pushed to the very end.
+  # This combined form remains the on-disk Notification Package content
+  # (Round 6 shape, unchanged); Round 7 only changes Telegram delivery
+  # (below) to send these same pieces as separate messages instead of one
+  # blindly character-chunked stream.
+  local handoff_package
+  handoff_package="$(cat <<EOF
+${po_summary_section}
+
+${decision_options_zh}
+${next_handoff_section}
+${evidence_reference_section}
+${raw_evidence_section}
+EOF
+)"
+
+  # Sprint-017 Must Fix Round 7: header_zh and delivery_metadata_zh are
+  # built once, as their own variables, so the same text can be reused both
+  # for the on-disk Notification Package (unchanged from Round 6: one
+  # complete file, still the Artifact-First source of truth) and for the
+  # section-aware Telegram message groups constructed further down. Neither
+  # piece is ever part of the Next AI Handoff standalone message.
+  local header_zh risk_level_line
   if _gate_is_high_risk "$gate_id"; then
-    cat > "$notif_path" <<EOF
+    risk_level_line="high"
+    header_zh="$(cat <<EOF
 ⚠️ 高風險 Gate：${GATE_NAME_ZH}
 
 📌 Sprint
@@ -2188,26 +2567,11 @@ ${mode_summary_zh}
 
 ✅ Product Owner 下一步
 ${GATE_PO_ACTION_ZH}
-
-📦 Handoff Package
----
-${handoff_package}
----
-
-🧾 Delivery Metadata
-gate_id: ${gate_id}
-event_type: ${gate_id}
-project_id: ${project_id}
-project_name: ${project_name}
-notification_recipient: Product Owner
-next_actor: ${GATE_NEXT_ACTOR}
-risk_level: high
-delivery_channel: telegram
-delivery_status: pending（Notification Package 產生當下狀態，非實際送達結果；實際送達結果請查 Notification History）
-created_at: ${created_at}
 EOF
+)"
   else
-    cat > "$notif_path" <<EOF
+    risk_level_line="${GATE_RISK_LEVEL}"
+    header_zh="$(cat <<EOF
 🔔 AI Workspace Gate 通知
 
 📌 Sprint
@@ -2231,12 +2595,12 @@ ${mode_summary_zh}
 
 ✅ Product Owner 下一步
 ${GATE_PO_ACTION_ZH}
+EOF
+)"
+  fi
 
-📦 Handoff Package
----
-${handoff_package}
----
-
+  local delivery_metadata_zh
+  delivery_metadata_zh="$(cat <<EOF
 🧾 Delivery Metadata
 gate_id: ${gate_id}
 event_type: ${gate_id}
@@ -2244,12 +2608,32 @@ project_id: ${project_id}
 project_name: ${project_name}
 notification_recipient: Product Owner
 next_actor: ${GATE_NEXT_ACTOR}
-risk_level: ${GATE_RISK_LEVEL}
+risk_level: ${risk_level_line}
 delivery_channel: telegram
 delivery_status: pending（Notification Package 產生當下狀態，非實際送達結果；實際送達結果請查 Notification History）
 created_at: ${created_at}
 EOF
-  fi
+)"
+
+  # The Notification Package IS the rendered Traditional-Chinese Telegram
+  # layout (Section 8 of docs/development/telegram-po-gate-notification-specification.md):
+  # no separate data structure is kept and re-rendered later (Artifact
+  # First). Delivery Status is always "pending" at generation time; the
+  # authoritative outcome is recorded only in Notification History. This
+  # file remains ONE complete record of everything (header + Handoff
+  # Package + Delivery Metadata), unchanged in shape from Round 6 --
+  # Round 7 only changes how it is *sent* to Telegram (see below), not what
+  # is written to disk.
+  cat > "$notif_path" <<EOF
+${header_zh}
+
+📦 Handoff Package
+---
+${handoff_package}
+---
+
+${delivery_metadata_zh}
+EOF
 
   echo "Written: $notif_path"
 
@@ -2270,42 +2654,88 @@ EOF
     error_message="curl is not installed"
     echo "WARNING: curl is not installed; cannot deliver to Telegram." >&2
   else
-    # Artifact First (Sprint-013 Must Fix 1 pattern): send the Notification
-    # Package artifact's own text, unmodified. No separate message is
-    # composed.
-    local chunk_dir
-    chunk_dir="$(mktemp -d)"
-    _notify_split_for_telegram "$notif_path" "$chunk_dir"
+    # Sprint-017 Must Fix Round 7 (AI Handoff Standalone Message / Copy
+    # Boundary UX Improvement): Product Owner reported that blindly
+    # character-chunking the whole Notification Package (Round 3-6
+    # behavior) could still land part of Evidence Reference / Delivery
+    # Metadata / raw evidence in the same Telegram message as the Next AI
+    # Handoff Package, forcing Product Owner to visually find the copy
+    # boundary before pasting. Delivery is now section-aware: each logical
+    # group below is sent as its own, separate Telegram message, in a
+    # fixed order, instead of one continuous chunked stream. Every group's
+    # text is still a verbatim, unmodified subset of the exact same content
+    # written to $notif_path above (Artifact First is preserved -- nothing
+    # is re-composed or summarized, only grouped along section boundaries
+    # instead of raw character counts).
+    #
+    # Group 1: header + Product Owner Summary + Decision Options.
+    # Group 2 (only in handoff/full mode, only if next-handoff-path was
+    #          given): the Next AI Handoff standalone copy message --
+    #          nothing else, ever (see next_handoff_copy_message above,
+    #          already validated to fit in one message).
+    # Group 3: Evidence Reference + Delivery Metadata.
+    # Group 4 (only in full mode): Raw Artifact Evidence, further
+    #          character-chunked by the existing _notify_split_for_telegram
+    #          if it is long (unlike Group 2, splitting Group 4 across
+    #          multiple messages is acceptable -- it is evidence, not a
+    #          copy-paste instruction).
+    local telegram_message_dir
+    telegram_message_dir="$(mktemp -d)"
+    local -a telegram_message_files=()
+
+    printf '%s\n%s\n\n%s' "$header_zh" "$po_summary_section" "$decision_options_zh" \
+      > "$telegram_message_dir/group-1-summary.txt"
+    telegram_message_files+=("$telegram_message_dir/group-1-summary.txt")
+
+    if [[ -n "$next_handoff_copy_message" ]]; then
+      printf '%s' "$next_handoff_copy_message" > "$telegram_message_dir/group-2-next-handoff.txt"
+      telegram_message_files+=("$telegram_message_dir/group-2-next-handoff.txt")
+    fi
+
+    printf '%s\n\n%s' "$evidence_reference_section" "$delivery_metadata_zh" \
+      > "$telegram_message_dir/group-3-evidence-metadata.txt"
+    telegram_message_files+=("$telegram_message_dir/group-3-evidence-metadata.txt")
+
+    if [[ -n "$raw_evidence_section" ]]; then
+      local raw_evidence_chunk_dir="$telegram_message_dir/group-4-raw-evidence-chunks"
+      mkdir -p "$raw_evidence_chunk_dir"
+      printf '%s' "$raw_evidence_section" > "$telegram_message_dir/group-4-raw-evidence-source.txt"
+      _notify_split_for_telegram "$telegram_message_dir/group-4-raw-evidence-source.txt" "$raw_evidence_chunk_dir"
+      local raw_evidence_chunk_file
+      for raw_evidence_chunk_file in "$raw_evidence_chunk_dir"/chunk-*.txt; do
+        [[ -f "$raw_evidence_chunk_file" ]] && telegram_message_files+=("$raw_evidence_chunk_file")
+      done
+    fi
 
     local all_ok=true
     local any_attempted=false
-    local chunk_file
-    for chunk_file in "$chunk_dir"/chunk-*.txt; do
-      [[ -f "$chunk_file" ]] || continue
+    local msg_file
+    for msg_file in "${telegram_message_files[@]}"; do
+      [[ -f "$msg_file" ]] || continue
       any_attempted=true
       local telegram_url="https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage"
       local response
       if response="$(curl -fsS --max-time 5 -X POST "$telegram_url" \
             --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
-            --data-urlencode "text@${chunk_file}" 2>/dev/null)"; then
+            --data-urlencode "text@${msg_file}" 2>/dev/null)"; then
         echo "$response" | grep -q '"ok":true' || all_ok=false
       else
         all_ok=false
       fi
     done
-    rm -rf "$chunk_dir"
+    rm -rf "$telegram_message_dir"
 
     if ! $any_attempted; then
       delivery_status="failed"
-      error_message="No message chunks were produced from the Notification Package"
-      echo "WARNING: Telegram delivery produced no chunks to send. Continuing without blocking the workflow." >&2
+      error_message="No message groups were produced from the Notification Package"
+      echo "WARNING: Telegram delivery produced no message groups to send. Continuing without blocking the workflow." >&2
     elif $all_ok; then
       delivery_status="delivered"
       delivered_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-      echo "Telegram delivery: delivered (Gate Notification Package sent verbatim)."
+      echo "Telegram delivery: delivered (section-aware messages sent verbatim)."
     else
       delivery_status="failed"
-      error_message="Telegram API request failed for at least one message chunk"
+      error_message="Telegram API request failed for at least one message group"
       echo "WARNING: Telegram API request failed. Continuing without blocking the workflow." >&2
     fi
   fi
