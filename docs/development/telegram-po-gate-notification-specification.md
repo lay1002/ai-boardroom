@@ -1,6 +1,6 @@
 # Telegram PO Gate Notification Specification
 
-Version: 1.7 (Sprint-014, wording clarified in Sprint-016; notify-gate Execution Policy, Manual/Formal distinction, inline artifact content, Product Owner Summary, Next AI Handoff Package, Telegram Content Mode, and section-aware standalone message split requirements added in Sprint-017)
+Version: 1.11 (Sprint-014, wording clarified in Sprint-016; notify-gate Execution Policy, Manual/Formal distinction, inline artifact content, Product Owner Summary, Next AI Handoff Package, Telegram Content Mode, and section-aware standalone message split requirements added in Sprint-017; 14-Gate operational matrix cross-reference and Claude Report Push to Product Owner added in Sprint-018; Claude Report Push 執行責任與 Round 3 誤植勘誤 added in Sprint-018 Must Fix Round 5; Round 5 conditional-invocation gap fixed to unconditional invocation + Product Owner Live Flow Validation acceptance criterion added in Sprint-018 Must Fix Round 6)
 
 ## 1. Sprint-014 目的
 
@@ -509,3 +509,138 @@ ERROR: Next AI Handoff Package '<path>' is too long to send as a single, uninter
 - 與第 20 節「Full Raw Artifact Evidence 內嵌」原則不衝突：Raw Artifact Evidence 只在 full mode 才出現，且固定排在 Next AI Handoff message（Message 2）之後，絕不會插入其中。
 - 與第 21/22/23 節原則不衝突：Product Owner Summary、Next AI Handoff Package、Content Mode 的內容規則本身未變，Round 7 只改變「這些內容如何被分組送到 Telegram」。
 - 與第 21.3/23.5 節「Contract Coverage 不等於 Live Delivery」原則不衝突：Section-aware split 是否正確運作，屬於 contract validation 的一部分（`scripts/test_review_bridge.sh` Test 32），不代表 21 個 Gate 都已經完成 live delivery。
+
+## 25. Sprint-018：14 個操作性 Gate 的具體操作準則
+
+Sprint-018 把本規格第 1–24 節定義的通用能力（Content Mode、Product Owner Summary、Next AI Handoff Package、Evidence Reference、Section-aware 訊息拆分），套用到 21 個 canonical Gate 中挑選出的 14 個「操作性」Gate 上（Round 1 選出 13 個，Round 2 新增 `claude_must_fix_report_acceptance` 第 14 個），逐一定義每個 Gate 應該用什麼 Content Mode、是否需要 Next AI Handoff Package、Target AI 為何。具體內容見 `reviews/sprint-018/round-001/gate_notification_matrix.md`，操作導覽入口見 `docs/development/product-owner-gate-operation-ux.md`。這是「如何使用本規格」的操作準則文件，不是本規格的延伸或修改——`notify-gate` 的 CLI 介面、訊息格式、Content Mode 定義本身在 Sprint-018 未被改動。
+
+## 26. Claude Report Push to Product Owner（Sprint-018 Must Fix Round 2）
+
+### 26.1 目的
+
+Claude Code 完成 Implementation 或 Fix 後，若只在 terminal / chat 中回報完成，Product Owner 可能不知道目前已經可以進入 Codex Review。本節定義「Claude Report Push to Product Owner」這個獨立的通知類別，讓 Claude Implementation Report / Fix Report 完成時也能推播給 Product Owner，適用於 `gate_notification_matrix.md` 標示為「Claude Completion Gate」的 Gate（目前為 `claude_implementation_report_acceptance` 與 `claude_must_fix_report_acceptance`）。
+
+### 26.2 推播內容規則
+
+Telegram 推播內容至少必須包含以下 16 項：
+
+```text
+1. Sprint ID
+2. Round ID
+3. Current Gate
+4. Completed actor：Claude Code
+5. Completed artifact path
+6. Claude Report summary
+7. Files changed
+8. Tests run
+9. Test result
+10. Deviations / Risks / Not Done
+11. Product Owner Action Required
+12. Product Owner Decision Options
+13. Suggested next actor：Codex
+14. Safety warning：
+    - Claude did not call Codex.
+    - Claude did not approve the Gate.
+    - Product Owner must manually decide whether to send to Codex.
+15. Codex review instruction source：canonical template / codex_review_handoff_policy.md
+16. Copy guidance：Product Owner should paste Claude Report content together with fixed Codex Review requirements.
+```
+
+第 1–13 項對應既有 Gate Notification Package 的 Header / Product Owner Summary / Decision Options / Evidence Reference 等既有區塊（沿用第 19–24 節已定義的結構，不重新發明格式）；第 14–16 項是「Claude Report Push to Product Owner」新增的專屬區塊，明確傳達本節第 26.3 節的安全邊界。
+
+### 26.3 與既有通知類型的明確區分
+
+```text
+Claude Report Push to PO
+≠ Formal Codex Review Approval        （不是 Codex Review 已核准）
+≠ Auto Handoff to Codex               （不是自動轉交給 Codex）
+≠ Auto Gate Approval                  （不是自動核准任何 Gate）
+```
+
+Claude Report Push to PO 跟本規格定義的所有其他 Gate Notification 一樣，必須由 Product Owner 手動執行 `notify-gate`（見第 18 節 notify-gate Execution Policy）；Claude / Codex 不得自動觸發 Telegram（第 19 節）。送出這則通知本身**不代表**任何 Gate 已核准，也**不代表**已經轉交給下一位 AI 執行者——是否送給 Codex、何時送、送什麼內容，全部由 Product Owner 決定並手動操作，完整流程見 `docs/development/product-owner-gate-operation-ux.md` 第 6 節。
+
+### 26.4 Codex Review 指令來源
+
+依 `reviews/sprint-018/round-001/codex_review_handoff_policy.md`：Product Owner 若決定把 Claude Report 內容貼給 Codex，必須同時附上 canonical Codex Review 要求（Review Independence Requirement、Git Diff/Git Status Check、Scope/Out of Scope Check、Runtime Evidence Exclusion Check），不得只貼 Claude Report 本身就要求 Codex 下結論。Claude Report 是 Codex Review 的 input，不是 authority。
+
+**勘誤（Sprint-018 Must Fix Round 5）**：本節第 26.3 節原文寫「必須由 Product Owner 手動執行 `notify-gate`」，這是文字誤植——`push-claude-report` 是與 `notify-gate` 完全獨立的指令，26.3 節談的本來就是 `push-claude-report`，不是 `notify-gate`。第 27 節取代這個誤植的執行責任規則。
+
+## 27. Claude Report Push 執行責任（Sprint-018 Must Fix Round 5）
+
+### 27.1 問題
+
+Round 4 已把 `push-claude-report` 的 16 項欄位內容契約做到 PASS，但 Product Owner Telegram Live Validation 仍判定 NOT PASS，原因是：`push-claude-report` 純粹是人工 CLI 指令，Claude Code 完成 Implementation / Fix Report 後，沒有任何流程會自動或半自動觸發它——Product Owner 必須自己記得、自己手動執行指令才會收到 Telegram 通知。這違背 Sprint-018 的核心目的：「Claude 完成後，Product Owner 應該主動知道」。
+
+### 27.2 與 notify-gate Execution Policy（第 18/19 節）的關係——明確的例外，範圍限定於 push-claude-report
+
+第 18/19 節「Claude / Codex 不得自動觸發 Telegram」「Claude Code 不得執行 `notify-gate`」的規則**完全不變**，仍然 100% 適用於 `notify-gate`——`notify-gate` 涉及 Gate 決策與 Next AI Handoff Package，必須維持人工決策。
+
+`push-claude-report` 性質不同：它不核准任何 Gate、不轉交任何 AI 執行者、不包含 Next AI Handoff Package，純粹是「把已經寫好的報告內容送一份給 Product Owner 知道」的通知。Product Owner 在本輪 Must Fix 中明確指示：在嚴格限定的條件下，允許 Claude Code 自己執行 `push-claude-report`（但不允許執行 `notify-gate`）。這是 Product Owner 對 `push-claude-report`（且僅限 `push-claude-report`）執行責任的明確調整，不擴大到本規格其他任何指令。
+
+### 27.3 Claude Report Completion Notification Step 規則（Sprint-018 Must Fix Round 6 修正：一律嘗試呼叫，不再自行判斷是否執行）
+
+**Round 5 的缺陷（Round 6 修正的原因）**：Round 5 原本規定「5 個環境變數全部存在才執行，任一缺少就不得執行 `push-claude-report`」。這個設計有一個實務上的根本問題：只要 Telegram 相關變數（在目前每一次實際執行中都尚未設定），Claude Code 就完全**不呼叫**這個指令——代表 `push-claude-report` 從未被實際執行過，`reviews/notification_history.jsonl` 沒有任何一筆紀錄、`reviews/<sprint>/round-<round>/notifications/` 也沒有任何 push artifact 檔案。Product Owner 唯一能看到的「證據」是 Claude Report 裡的一段文字聲明——這無法被獨立稽核，也是 Sprint-018 Product Owner Validation 判定 FAIL 的直接原因（見 `reviews/sprint-018/round-001/claude_fix_report_round_6.md`）。
+
+**Round 6 修正**：Claude Code 完成一份 Claude Implementation Report（`claude_report.md`）或 Claude Fix Report（`claude_fix_report*.md`）、且已執行完 Sprint 要求的測試之後，在結束該輪工作前，**一律**（不設任何前置條件）執行：
+
+```bash
+PROJECT_ID=ai-workspace PROJECT_NAME="AI Workspace" \
+  ./scripts/review_bridge.sh push-claude-report <sprint-id> <round> <implementation|fix> [report-path]
+```
+
+（`implementation` 或 `fix` 依報告類型選擇；`report-path` 僅在報告不在預設路徑時提供。`PROJECT_ID=ai-workspace`、`PROJECT_NAME="AI Workspace"` 是本 repo 既有真實 `reviews/notification_history.jsonl` 紀錄中一致使用的專案識別值，**不是密鑰**，由 Claude Code 直接帶入，確保指令不會因為缺少這兩個必要參數而中止執行——這兩個值只是「這是哪個專案」的標籤，與 Telegram 憑證的機密性質完全不同。）
+
+`push-claude-report` 指令本身（`cmd_push_claude_report()`，Sprint-018 Round 5 起）已經能安全處理 Telegram 相關變數缺少的情況：
+
+- 若本機 shell 環境已經具備 `NOTIFICATION_ENABLED=true`、`TELEGRAM_BOT_TOKEN`、`TELEGRAM_CHAT_ID`（Claude Code 只需讓這些變數透過既有 shell 環境自然傳遞給指令，**絕不**讀取、印出、記錄、或以任何形式在對話或檔案中顯示這些變數的實際值，也**絕不**要求 Product Owner 把值貼給自己）：指令會實際嘗試送出 Telegram，`delivery_status` 為 `delivered` 或 `failed`。
+- 若缺少：指令仍會正常執行完畢（不會 `die`、不會中止），寫入本機 push artifact 檔案，並在 `reviews/notification_history.jsonl` 寫入 `delivery_status: disabled` 的一筆紀錄——這筆紀錄本身，加上磁碟上的 push artifact 檔案，就是「completion step 確實執行過」的可獨立稽核證據，不再只依賴 Claude Report 裡的文字聲明。
+
+Claude Code **不得**在呼叫前自行判斷「反正 Telegram 變數應該沒設定，所以不呼叫」而略過這個指令——**一律呼叫**是本節的核心規則；指令內部的 Telegram 相關 opt-in 邏輯（`NOTIFICATION_ENABLED=true` 才送出）完全不變，只是「是否呼叫指令本身」不再由 Claude Code 自行判斷後決定要不要執行。
+
+不論最終 `delivery_status` 是 `delivered`、`disabled`、或 `failed`，`push-claude-report` 本身的行為完全不變（仍然是第 26 節定義的 16 項欄位內容契約、仍然是 `NOTIFICATION_ENABLED=true` + Token/Chat ID 的 opt-in 機制、仍然不核准任何 Gate、不呼叫 Codex）。
+
+### 27.4 Claude Report 必須包含 `## Telegram Push Status` 區塊（Round 6 修正：Push attempted 現在應恆為 YES）
+
+```markdown
+## Telegram Push Status
+
+- Push attempted: YES / NO
+- Reason (if NO): completion step itself could not run for a reason unrelated to Telegram config (e.g. Bash tool unavailable) / other — NOT simply "Telegram env not configured", since that case is now always attempted (see 27.3)
+- Delivery status: delivered / failed / disabled / not_attempted
+- Push artifact path: reviews/<sprint>/round-<round>/notifications/claude-report-push-<gate_id>.md
+- Notification history reference: reviews/notification_history.jsonl（同一次執行寫入的紀錄，含 delivery_status）
+- Manual command (僅在 Push attempted 為 NO 這種例外情況下，供 Product Owner 自行執行):
+  PROJECT_ID=<PROJECT_ID> PROJECT_NAME=<PROJECT_NAME> NOTIFICATION_ENABLED=true TELEGRAM_BOT_TOKEN=<TOKEN> TELEGRAM_CHAT_ID=<CHAT_ID> ./scripts/review_bridge.sh push-claude-report <sprint-id> <round> <implementation|fix>
+```
+
+**Round 6 修正**：自本輪起，`Push attempted` 應該**恆為 YES**——因為 27.3 節已改為「一律呼叫」，不再有「Telegram 變數缺少所以不呼叫」這種情況。`Push attempted: NO` 只保留給真正的例外情況（例如 Claude Code 執行環境本身無法執行 Bash 指令），這種情況極為罕見，且與「Telegram 有沒有設定」無關。`Delivery status` 的三個正常值（`delivered` / `failed` / `disabled`）對應 `scripts/review_bridge.sh` `cmd_push_claude_report()` 實際寫入 `reviews/notification_history.jsonl` 的 `delivery_status` 欄位；`not_attempted` 只在 `Push attempted: NO` 這種例外情況下使用（不再是 Telegram 變數缺少時的正常結果）。
+
+### 27.5 Notification History 必須完整記錄，包含未設定的情況
+
+`cmd_push_claude_report()` 自 Round 5 起，不論 `NOTIFICATION_ENABLED` 是否為 `true`，都會呼叫 `_gate_write_history()` 寫入 `reviews/notification_history.jsonl`（`delivery_status` 為 `disabled` / `failed` / `delivered` 其中之一）——先前版本在 `NOTIFICATION_ENABLED` 不是 `true` 時會直接 `return 0`，完全不寫入歷史紀錄，導致「Claude Code 是否曾經嘗試推播」這件事無法被事後稽核。這與 `cmd_notify()` / `cmd_notify_gate()` 既有的 `disabled` 慣例一致（`docs/development/notification-package-specification.md`、本規格第 12 節）。Round 6 起，因為 27.3 節規定一律呼叫指令，這筆歷史紀錄現在**保證每一輪都會存在**（而非只在 Telegram 變數恰好齊全時才存在），這正是本輪要修的可稽核性缺口。
+
+### 27.6 安全邊界（與 Sprint-018 其餘規則完全一致，未新增例外）
+
+- 不自動呼叫 Codex：`push-claude-report` 的實作本身不含任何呼叫 Codex 的程式碼（見 `scripts/test_review_bridge.sh` Test 35k 的靜態驗證）。
+- 不自動核准任何 Gate：本節的執行行為只是「執行一個既有的、唯讀報告內容的通知指令」，不改變任何 Gate 狀態。
+- 不自動 commit、不自動 push：本節與 git 操作完全無關。
+- 不修改 `configs/n8n/*.json`。
+- 不會把 Telegram token / chat id 寫入 repo：這些值只存在於 Product Owner 自己的本機 shell 環境；Claude Code 讓它們透過既有 shell 環境自然傳遞給指令，不讀取、不印出、不記錄、不索取。`PROJECT_ID=ai-workspace`、`PROJECT_NAME="AI Workspace"` 不是機密，是專案識別標籤，可以直接寫在指令與文件裡。
+- 不要求 Product Owner 把 Telegram token 貼給 AI：27.3 節明確規定 Claude Code 只依賴既有 shell 環境自然傳遞，不索取這些值。
+- 不破壞 Sprint-017 handoff mode 三訊息模型：本節完全不觸碰 `cmd_notify_gate()`，該函式本體自 Sprint-017 起未被修改。
+- 仍然是 opt-in delivery：`push-claude-report` 本身仍然完全依賴 `NOTIFICATION_ENABLED=true` + Token/Chat ID 才會真正送出 Telegram；本節只決定「一律呼叫這個既有指令」，指令內部是否真正送達 Telegram 的 opt-in 機制完全不變。
+
+### 27.7 Product Owner Live Flow Validation 驗收標準（Sprint-018 Must Fix Round 6）
+
+Product Owner 只有在**下列條件同時成立**時，才可判定 Product Owner Live Flow Validation PASS：
+
+```text
+Claude Code 完成 Implementation / Fix Report 後，
+Product Owner 未手動執行 push-claude-report，
+仍然在 reviews/notification_history.jsonl 看到一筆新的、delivery_status 為
+delivered（若本機已設定真實 Telegram 憑證）或 disabled（若尚未設定）的紀錄，
+且 reviews/<sprint>/round-<round>/notifications/ 底下有對應的 push artifact 檔案，
+且 Claude Code 自己的完成報告裡有 ## Telegram Push Status 區塊誠實記錄上述結果。
+```
+
+若 `delivery_status` 為 `delivered`，Product Owner 應該同時在 Telegram 實際收到訊息，這是最直接的驗證方式。若為 `disabled`（Telegram 憑證尚未設定），Product Owner 驗證的重點不是「有沒有收到 Telegram」（本來就不會收到），而是「`reviews/notification_history.jsonl` 與 push artifact 檔案是否確實在 Claude Code 完成工作的同一時間點被寫入」——這證明 completion step 真的執行了指令本身，而不是 Claude Code 只在報告裡用文字宣稱。這個判斷不依賴 Product Owner 是否手動執行過任何指令；即使 Product Owner 從頭到尾沒有打開終端機，也應該能在 repo 裡找到這筆紀錄與這個檔案。

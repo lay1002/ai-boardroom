@@ -439,6 +439,35 @@ Every Sprint Retrospective / Actual Flow Report MUST additionally include a `## 
 
 **Relationship to `docs/development/development-principles.md`**: the canonical Sprint Retrospective structure (Objective / Root Cause / Lessons Learned / Process Improvement / Backlog / Product Owner Decision) is defined by Development Principles v2.0 Principle 6, Section 3 "Rule 6 Mandatory Template" — the Development Constitution, which has higher authority than this document (see this document's own Development Principles Authority section) and is not modified by Sprint-017. This section adds `## Flow Deviation Check` as an **additional required section** for every Retrospective going forward, layered on top of the Constitution's template rather than replacing or renumbering it. Per Development Principles Principle 7 ("Process Improvement Never Goes Backwards"), this addition must be preserved or strengthened by future Sprints. Whether to formally fold `## Flow Deviation Check` into the Constitution's own Section 3 template text is left to Product Owner's discretion in a future dedicated Sprint that explicitly touches `development-principles.md` — Sprint-017 does not modify that file.
 
+## Product Owner Gate Operation UX (Sprint-018)
+
+Sprint-013–017's Telegram / Handoff capabilities are now formally adopted into the ongoing development flow. `docs/development/product-owner-gate-operation-ux.md` is the entry-point document for how Product Owner actually operates the Gate notification system day-to-day (the operating loop, which Content Mode to use when, and pointers to the authoritative specs). `reviews/sprint-018/round-001/gate_notification_matrix.md` defines the concrete notify-gate operating contract (Notification purpose, Decision options, Next AI Handoff Package requirement, Target AI, copy boundary, stop condition, recommended Content Mode) for 14 of the 21 canonical Product Owner Gates — selected as the highest-judgment, highest-risk, or phase-starting Gates, plus `claude_must_fix_report_acceptance` added in Must Fix Round 2 as the Claude Fix Report Ready checkpoint (symmetric to `claude_implementation_report_acceptance`); the remaining 7 canonical Gates are unaffected and still fully defined in `docs/development/product-owner-gate-metadata.md`.
+
+## Claude Report Completion Notification Step (Sprint-018 Must Fix Round 5; unconditional invocation fixed in Round 6)
+
+After Claude Code finishes writing a Claude Implementation Report (`claude_report.md`) or a Claude Fix Report (`claude_fix_report*.md`) and has run the Sprint's required tests, completing that report is not finished until Claude Code has also performed the Claude Report Completion Notification Step.
+
+**Round 5's original design required all 5 env vars to be present before invoking `push-claude-report` at all, skipping the call entirely otherwise. Product Owner's live-flow validation found this insufficient: because the Telegram-specific vars were never actually set in any real session, the command was never once invoked, `reviews/notification_history.jsonl` never gained a record, and no push artifact was ever produced — Product Owner had nothing verifiable to check, only Claude's own prose claim of "not attempted."**
+
+**Round 6 fixes this: Claude Code unconditionally runs**
+
+```bash
+PROJECT_ID=ai-workspace PROJECT_NAME="AI Workspace" \
+  ./scripts/review_bridge.sh push-claude-report <sprint-id> <round> <implementation|fix> [report-path]
+```
+
+**as the final step before ending the turn, every time, with no pre-check gating whether the call happens.** `PROJECT_ID`/`PROJECT_NAME` are non-secret project labels (the repo's established real convention), supplied directly so the command never dies for lack of them. Whatever Telegram-specific variables (`NOTIFICATION_ENABLED`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`) already exist in the local shell environment pass through naturally — Claude Code never reads, prints, logs, or otherwise surfaces their values, and never asks Product Owner to paste them into the chat. The command itself (unchanged since Round 5) determines the outcome: `delivered` if Telegram vars are present and delivery succeeds, `disabled` if they are absent, `failed` if delivery itself errors — and in every case, writes a real `reviews/notification_history.jsonl` record and a real push artifact under `reviews/<sprint>/round-<round>/notifications/`, which is what makes the step verifiable independent of Claude's own report text.
+
+This remains a narrow, Product-Owner-authorized exception scoped to `push-claude-report` only — it does not change the `notify-gate` Execution Policy (`docs/development/telegram-po-gate-notification-specification.md` Sections 18–19), which remains exclusively a human-triggered command; Claude Code still must never run `notify-gate`. See `docs/development/telegram-po-gate-notification-specification.md` Section 27 for the full rule, the safety boundaries it does not change (no auto Codex call, no auto Gate approval, no auto commit/push, no `configs/n8n/*.json` changes, no Telegram token ever requested from or shown by Claude Code, opt-in Telegram delivery unchanged), the required `## Telegram Push Status` report section format, and Section 27.7's Product Owner Live Flow Validation acceptance criterion.
+
+## Independent Review Handoff Authority (Sprint-018)
+
+**Claude Implementation Report may be an input to a Codex Review Handoff, but Claude Code must never single-handedly decide the Codex Review's scope, checklist, Required Reading, or forbidden actions.** A Codex Review Handoff must be composed from the approved canonical template — `reviews/sprint-018/round-001/codex_review_handoff_policy.md` Section 3 (Review Independence Requirement, Git Diff/Git Status Check, Scope/Out of Scope Check, Runtime Evidence Exclusion Check) plus the existing `docs/development/git-review-checklist.md` / `docs/development/execution-permission-policy.md` where applicable — never a checklist Claude invents or narrows on its own inside `claude_report.md`. This prevents the implementer from ever being the sole author of the standard its own work will be judged against.
+
+## Review Bridge Self-Modification Safety Rule (Sprint-018)
+
+If a Sprint modifies Review Bridge itself — `scripts/review_bridge.sh`, a Handoff Package Template, `notify-gate`, the Telegram renderer, or copy-boundary generation — that Sprint's Codex Review must not rely solely on the newly-modified Review Bridge's own output as evidence. Codex must additionally inspect the Architecture directly, the fixed checklist directly, the actual source diff, and the test evidence's own assertion logic (not just "tests are green"), since a bug in the modified tool could make its own output look self-consistent while still being wrong. See `reviews/sprint-018/round-001/codex_review_handoff_policy.md` Section 4 for the full trigger conditions and required checks.
+
 ## Scope Control
 
 All AI participants must obey:

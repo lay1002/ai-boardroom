@@ -2204,6 +2204,724 @@ assert_eq "32n: the real repository's notification_history.jsonl is unaffected b
 echo "  (Sprint-013/014/016/017 notify, notify-gate, and Gate metadata tests re-verified above, run unchanged in this same suite: zero regression)"
 
 ###############################################################################
+# Test 33: Sprint-018 Product Owner Gate Operation UX MVP -- Gate
+# Notification Matrix (14 selected gates) and Codex Review Handoff Policy
+###############################################################################
+echo ""
+echo "=== Test 33: Sprint-018 Gate Notification Matrix + Codex Review Handoff Policy ==="
+
+SPRINT18_MATRIX="/home/ivan/AI/reviews/sprint-018/round-001/gate_notification_matrix.md"
+SPRINT18_POLICY="/home/ivan/AI/reviews/sprint-018/round-001/codex_review_handoff_policy.md"
+
+assert_true "33a-0: gate_notification_matrix.md exists" "[[ -f \"$SPRINT18_MATRIX\" ]] && true || false"
+assert_true "33a-1: codex_review_handoff_policy.md exists" "[[ -f \"$SPRINT18_POLICY\" ]] && true || false"
+
+matrix_content="$(cat "$SPRINT18_MATRIX" 2>/dev/null || echo "")"
+
+# 33b: all 14 selected gate_ids are documented in the matrix, each with the
+# required field labels.
+# Sprint-018 Must Fix Round 2: claude_must_fix_report_acceptance was added
+# as a 14th gate (Product Owner's explicit instruction -- see
+# claude_fix_report_round_2.md), since claude_must_fix_approval (gate 6)
+# is the pre-fix authorization gate and cannot represent the post-fix
+# "Fix Report is ready for review" checkpoint that claude_must_fix_approval
+# was originally mistaken for.
+SPRINT18_GATES=(
+  sprint_start_approval
+  architecture_definition_approval
+  claude_implementation_approval
+  claude_implementation_report_acceptance
+  codex_review_result_decision
+  claude_must_fix_approval
+  claude_must_fix_report_acceptance
+  codex_final_review_result_decision
+  product_owner_validation_approval
+  codex_git_review_result_decision
+  commit_approval
+  push_approval
+  retrospective_content_approval
+  product_owner_closure_approval
+)
+assert_eq "33b-0: exactly 14 gates are in the Sprint-018 matrix (13 from Round 1 + 1 added in Round 2)" "14" "${#SPRINT18_GATES[@]}"
+
+# Sprint-018 Must Fix Round 1: Codex Review found that Test 33 only checked
+# whether field labels appeared *anywhere in the whole file*, not per-gate,
+# and that gates not needing a Next AI Handoff Package were allowed to
+# simply omit Target AI / copy boundary instead of stating them as N/A.
+# This block re-implements the check to walk each of the 13 gates
+# individually and verify each of the 14 required fields is present in
+# *that gate's own section* -- 13 x 14 = 182 individual field checks, plus
+# explicit N/A verification for the gates that do not need a handoff.
+_sprint18_extract_gate_section() {
+  local gid="$1"
+  awk -v pat="\`$gid\`" '
+    $0 ~ "### 3\\.[0-9]+ .*" pat {found=1; print; next}
+    found && /^### 3\./ {exit}
+    found {print}
+  ' "$SPRINT18_MATRIX"
+}
+
+SPRINT18_FIELDS=(
+  "Gate ID"
+  "Gate name"
+  "Notification purpose"
+  "Product Owner action required"
+  "Decision options"
+  "Recommended next step"
+  "Required Reading"
+  "Evidence reference"
+  "是否需要 Next AI Handoff Package"
+  "Target AI"
+  "copy boundary"
+  "notify-gate command requirement"
+  "stop condition"
+  "Telegram content mode"
+)
+
+# Gates whose "是否需要 Next AI Handoff Package" answer is "否" (or
+# defaults to "否"): Target AI / copy boundary must be an explicit N/A /
+# 不適用 on their own field line, not merely omitted.
+SPRINT18_NA_GATES=(
+  codex_git_review_result_decision
+  commit_approval
+  push_approval
+  retrospective_content_approval
+  product_owner_closure_approval
+)
+
+declare -A SPRINT18_GATE_SECTIONS=()
+all_g33_sections_present=true
+for gid in "${SPRINT18_GATES[@]}"; do
+  section="$(_sprint18_extract_gate_section "$gid")"
+  SPRINT18_GATE_SECTIONS["$gid"]="$section"
+  [[ -n "$section" ]] || { all_g33_sections_present=false; echo "    (matrix missing section for gate: $gid)"; }
+done
+assert_true "33b-1: all 14 gates have a matrix section" $all_g33_sections_present
+
+# 33m: per-gate, per-field presence check (196 assertions: 14 gates x 14
+# fields), reported individually so a missing field on any single gate is
+# immediately identifiable rather than hidden behind an aggregate boolean.
+for gid in "${SPRINT18_GATES[@]}"; do
+  section="${SPRINT18_GATE_SECTIONS[$gid]}"
+  for field in "${SPRINT18_FIELDS[@]}"; do
+    assert_contains "33m: gate '$gid' has field '$field'" "$field" "$section"
+  done
+done
+
+# 33n/33o: gates that do not need a Next AI Handoff Package explicitly
+# state Target AI and copy boundary as N/A / 不適用 on their own field
+# lines, rather than omitting the field or leaving it implicit.
+for gid in "${SPRINT18_NA_GATES[@]}"; do
+  section="${SPRINT18_GATE_SECTIONS[$gid]}"
+  target_ai_line="$(printf '%s\n' "$section" | grep -m1 '\*\*Target AI\*\*')"
+  copy_boundary_line="$(printf '%s\n' "$section" | grep -m1 '\*\*copy boundary\*\*')"
+  target_ai_na=false
+  [[ "$target_ai_line" == *"N/A"* || "$target_ai_line" == *"不適用"* ]] && target_ai_na=true
+  copy_boundary_na=false
+  [[ "$copy_boundary_line" == *"N/A"* || "$copy_boundary_line" == *"不適用"* ]] && copy_boundary_na=true
+  assert_true "33n: gate '$gid' explicitly states Target AI as N/A / 不適用" $target_ai_na
+  assert_true "33o: gate '$gid' explicitly states copy boundary as N/A / 不適用" $copy_boundary_na
+done
+
+# 33f/33g: gates that DO need a Next AI Handoff Package specify a real
+# Target AI (not N/A) and a real copy boundary marker containing "BEGIN
+# COPY TO", checked per-gate.
+SPRINT18_HANDOFF_GATES=(
+  sprint_start_approval
+  architecture_definition_approval
+  claude_implementation_approval
+  claude_implementation_report_acceptance
+  claude_must_fix_approval
+  claude_must_fix_report_acceptance
+  product_owner_validation_approval
+)
+all_g33_handoff_target_ai_real=true
+all_g33_handoff_copy_boundary_real=true
+for gid in "${SPRINT18_HANDOFF_GATES[@]}"; do
+  section="${SPRINT18_GATE_SECTIONS[$gid]}"
+  target_ai_line="$(printf '%s\n' "$section" | grep -m1 '\*\*Target AI\*\*')"
+  copy_boundary_line="$(printf '%s\n' "$section" | grep -m1 '\*\*copy boundary\*\*')"
+  [[ "$target_ai_line" != *"N/A"* && "$target_ai_line" != *"不適用"* ]] || { all_g33_handoff_target_ai_real=false; echo "    (gate $gid: Target AI unexpectedly N/A)"; }
+  [[ "$copy_boundary_line" == *"BEGIN COPY TO"* ]] || { all_g33_handoff_copy_boundary_real=false; echo "    (gate $gid: copy boundary missing BEGIN COPY TO)"; }
+done
+assert_true "33f: all handoff-needing gates specify a real (non-N/A) Target AI" $all_g33_handoff_target_ai_real
+assert_true "33g: all handoff-needing gates specify a real copy boundary marker" $all_g33_handoff_copy_boundary_real
+
+# 33h: the Codex Review Handoff Policy contains all 4 required checklist
+# blocks plus the Self-Modification Safety Rule.
+policy_content="$(cat "$SPRINT18_POLICY" 2>/dev/null || echo "")"
+assert_contains "33h-1: policy contains Review Independence Requirement" "Review Independence Requirement" "$policy_content"
+assert_contains "33h-2: policy contains Git Diff / Git Status Check" "Git Diff / Git Status Check" "$policy_content"
+assert_contains "33h-3: policy contains Scope / Out of Scope Check" "Scope / Out of Scope Check" "$policy_content"
+assert_contains "33h-4: policy contains Runtime Evidence Exclusion Check" "Runtime Evidence Exclusion Check" "$policy_content"
+assert_contains "33h-5: policy contains the Review Bridge Self-Modification Safety Rule" "Self-Modification Safety Rule" "$policy_content"
+assert_contains "33h-6: policy states Codex Review Handoff must not be decided by Claude alone" \
+  "不得只依賴新修改後的 Review Bridge 輸出" "$policy_content"
+
+# 33i: consensus-workflow.md formally documents Independent Review Handoff
+# Authority and the Self-Modification Safety Rule.
+consensus_doc33="$(cat /home/ivan/AI/docs/development/consensus-workflow.md 2>/dev/null || echo "")"
+assert_contains "33i-1: consensus-workflow.md documents Independent Review Handoff Authority" \
+  "Independent Review Handoff Authority" "$consensus_doc33"
+assert_contains "33i-2: consensus-workflow.md documents the Review Bridge Self-Modification Safety Rule" \
+  "Review Bridge Self-Modification Safety Rule" "$consensus_doc33"
+
+# 33j: re-confirm, specifically for the 14 selected gates, that a
+# section-aware handoff-mode delivery still isolates the Next AI Handoff
+# message correctly (requirement 7) -- reusing the same fake-curl technique
+# as Test 32, now scoped to exactly Sprint-018's selected gate set.
+SPRINT18_ARTIFACTS="$TEST_DIR/sprint18-artifacts"
+mkdir -p "$SPRINT18_ARTIFACTS"
+echo "artifact content" > "$SPRINT18_ARTIFACTS/artifact.md"
+SPRINT18_HANDOFF_MARKER="SPRINT18-HANDOFF-MARKER-$$"
+cat > "$SPRINT18_ARTIFACTS/next_handoff.md" <<EOF
+## 1. Target AI
+
+Codex
+
+$SPRINT18_HANDOFF_MARKER
+EOF
+
+SPRINT18_FAKE_BIN="$TEST_DIR/sprint18-fake-bin"
+mkdir -p "$SPRINT18_FAKE_BIN"
+cat > "$SPRINT18_FAKE_BIN/curl" <<'STUB'
+#!/usr/bin/env bash
+n=1
+while [[ -f "$CAPTURED_MESSAGES_DIR/msg-$(printf '%02d' "$n").txt" ]]; do n=$((n+1)); done
+for a in "$@"; do
+  case "$a" in
+    text@*) cp "${a#text@}" "$CAPTURED_MESSAGES_DIR/msg-$(printf '%02d' "$n").txt" ;;
+  esac
+done
+echo '{"ok":true}'
+exit 0
+STUB
+chmod +x "$SPRINT18_FAKE_BIN/curl"
+
+all_g33_msg2_clean=true
+round18=1
+for gid in "${SPRINT18_GATES[@]}"; do
+  msgs_dir="$TEST_DIR/sprint18-msgs-$round18"
+  mkdir -p "$msgs_dir"
+  round18_padded="$(printf '%03d' "$round18")"
+  PATH="$SPRINT18_FAKE_BIN:$PATH" CAPTURED_MESSAGES_DIR="$msgs_dir" \
+    PROJECT_ID=sprint18 PROJECT_NAME="Sprint18" NOTIFICATION_ENABLED=true \
+    TELEGRAM_BOT_TOKEN=tok TELEGRAM_CHAT_ID=1 REVIEWS_OVERRIDE="$TEST_DIR" \
+    bash "$BRIDGE" notify-gate "$gid" sprint18-matrix "$round18" \
+    "$SPRINT18_ARTIFACTS/artifact.md" "" "$SPRINT18_ARTIFACTS/next_handoff.md" >/dev/null 2>&1
+  msg2="$(cat "$msgs_dir/msg-02.txt" 2>/dev/null || echo "")"
+  if [[ -z "$msg2" || "$msg2" != *"BEGIN COPY TO CODEX"* ]]; then
+    all_g33_msg2_clean=false
+    echo "    (gate $gid: Message 2 is not the expected standalone Next AI Handoff message)"
+  fi
+  for forbidden in "Evidence Reference" "Delivery Metadata" "Product Owner Decision Options" "BEGIN ARTIFACT CONTENT"; do
+    [[ "$msg2" != *"$forbidden"* ]] || { all_g33_msg2_clean=false; echo "    (gate $gid: Message 2 unexpectedly contains $forbidden)"; }
+  done
+  ((round18++))
+done
+assert_true "33j: for all 14 Sprint-018 gates, handoff mode's Message 2 is a clean, standalone Next AI Handoff message" $all_g33_msg2_clean
+
+# 33k: configs/n8n/*.json remain unmodified by this Sprint's work.
+n8n_diff_g33="$(git -C /home/ivan/AI diff --stat configs/n8n/ 2>/dev/null || echo "")"
+assert_true "33k: configs/n8n/*.json show no diff (unmodified this Sprint)" "[[ -z \"\$n8n_diff_g33\" ]] && true || false"
+
+# 33l: this test block never triggered a real Telegram request or grew the
+# real repository's notification history.
+real_history_count_after_g33="$(wc -l < "$REAL_HISTORY_FILE" 2>/dev/null || echo 0)"
+assert_eq "33l: the real repository's notification_history.jsonl is unaffected by the Sprint-018 matrix tests" \
+  "$REAL_HISTORY_COUNT_BEFORE" "$real_history_count_after_g33"
+
+echo "  (Sprint-013/014/016/017 notify, notify-gate, and Gate metadata tests re-verified above, run unchanged in this same suite: zero regression)"
+
+###############################################################################
+# Test 34: Sprint-018 Must Fix Round 2 -- Claude Report Push to PO flow
+###############################################################################
+echo ""
+echo "=== Test 34: Claude Report Push to PO (Sprint-018 Must Fix Round 2) ==="
+
+SPRINT18_CLAUDE_COMPLETION_GATES=(
+  claude_implementation_report_acceptance
+  claude_must_fix_report_acceptance
+)
+SPRINT18_PUSH_TO_PO_FIELDS=(
+  "Claude report push to PO"
+  "Report artifact"
+  "PO review required"
+  "PO manually sends to Codex"
+  "Auto send to Codex"
+  "Codex review checklist authority"
+)
+
+# 34a: both Claude Completion Gates have all 6 Claude Report Push to PO
+# fields present in their own section.
+for gid in "${SPRINT18_CLAUDE_COMPLETION_GATES[@]}"; do
+  section="$(_sprint18_extract_gate_section "$gid")"
+  for field in "${SPRINT18_PUSH_TO_PO_FIELDS[@]}"; do
+    assert_contains "34a: gate '$gid' has field '$field'" "$field" "$section"
+  done
+done
+
+# 34b/34c/34d/34e: the specific field VALUES required by Must Fix Round 2
+# (not just the field labels) are present on both Claude Completion Gates.
+for gid in "${SPRINT18_CLAUDE_COMPLETION_GATES[@]}"; do
+  section="$(_sprint18_extract_gate_section "$gid")"
+  push_line="$(printf '%s\n' "$section" | grep -m1 '\*\*Claude report push to PO\*\*')"
+  po_review_line="$(printf '%s\n' "$section" | grep -m1 '\*\*PO review required\*\*')"
+  manual_send_line="$(printf '%s\n' "$section" | grep -m1 '\*\*PO manually sends to Codex\*\*')"
+  auto_send_line="$(printf '%s\n' "$section" | grep -m1 '\*\*Auto send to Codex\*\*')"
+  checklist_authority_line="$(printf '%s\n' "$section" | grep -m1 '\*\*Codex review checklist authority\*\*')"
+
+  assert_contains "34b: gate '$gid' Claude report push to PO is YES" "YES" "$push_line"
+  assert_contains "34c: gate '$gid' PO review required is YES" "YES" "$po_review_line"
+  assert_contains "34d: gate '$gid' PO manually sends to Codex is YES" "YES" "$manual_send_line"
+  assert_contains "34e: gate '$gid' Auto send to Codex is NO" "NO" "$auto_send_line"
+  assert_contains "34f: gate '$gid' Codex review checklist authority references the canonical policy" \
+    "codex_review_handoff_policy.md" "$checklist_authority_line"
+done
+
+# 34g: the Telegram specification documents a "Claude Report Push to
+# Product Owner" section.
+telegram_spec_content34="$(cat /home/ivan/AI/docs/development/telegram-po-gate-notification-specification.md 2>/dev/null || echo "")"
+assert_contains "34g: telegram-po-gate-notification-specification.md documents Claude Report Push to Product Owner" \
+  "Claude Report Push to Product Owner" "$telegram_spec_content34"
+
+# 34h/34i: the Codex Review Handoff Policy documents that Claude Report is
+# input-only, and that canonical review requirements must accompany it.
+policy_content34="$(cat "$SPRINT18_POLICY" 2>/dev/null || echo "")"
+assert_contains "34h: policy states Claude Report is review input, not review authority" \
+  "review input，不是 review authority" "$policy_content34"
+assert_contains "34i: policy states PO must include canonical review requirements when pasting to Codex" \
+  "必須同時附上 canonical Codex Review 要求" "$policy_content34"
+
+# 34j: the Product Owner Gate Operation UX doc documents Claude Report
+# Push to PO and its explicit non-equivalences.
+ux_doc_content34="$(cat /home/ivan/AI/docs/development/product-owner-gate-operation-ux.md 2>/dev/null || echo "")"
+assert_contains "34j-1: product-owner-gate-operation-ux.md documents Claude Report Push to PO" \
+  "Claude Report Push to PO" "$ux_doc_content34"
+assert_contains "34j-2: product-owner-gate-operation-ux.md distinguishes it from Auto Handoff to Codex" \
+  "Auto Handoff to Codex" "$ux_doc_content34"
+assert_contains "34j-3: product-owner-gate-operation-ux.md distinguishes it from Auto Gate Approval" \
+  "Auto Gate Approval" "$ux_doc_content34"
+
+# 34m/34n/34o/34p: Sprint-018 Must Fix Round 3 regression checks -- Codex
+# Final Review Supplement found that Round 2 left stale "13 Gate" / "Gate 6"
+# wording in consensus-workflow.md and product-owner-gate-operation-ux.md
+# that contradicted the already-corrected 14-Gate matrix. These checks
+# ensure that specific regression can never silently reappear.
+consensus_doc34="$(cat /home/ivan/AI/docs/development/consensus-workflow.md 2>/dev/null || echo "")"
+assert_true "34m: consensus-workflow.md no longer claims 13 of the 21 canonical gates" \
+  "[[ \"\$consensus_doc34\" != *'13 of the 21 canonical'* ]] && true || false"
+assert_true "34n: consensus-workflow.md no longer claims the remaining 8 canonical gates" \
+  "[[ \"\$consensus_doc34\" != *'remaining 8 canonical'* ]] && true || false"
+assert_true "34o: product-owner-gate-operation-ux.md no longer claims 13 個操作性 Gate" \
+  "[[ \"\$ux_doc_content34\" != *'13 個操作性 Gate'* ]] && true || false"
+assert_contains "34p-1: product-owner-gate-operation-ux.md's Claude Completion Gate list includes claude_must_fix_report_acceptance" \
+  "claude_must_fix_report_acceptance" "$ux_doc_content34"
+assert_contains "34p-2: product-owner-gate-operation-ux.md explicitly excludes claude_must_fix_approval from the Claude Completion Gate flow" \
+  "claude_must_fix_approval" "$ux_doc_content34"
+ux_exclusion_note="$(printf '%s\n' "$ux_doc_content34" | grep -m1 '明確排除')"
+assert_contains "34p-3: the exclusion note names claude_must_fix_approval as not a Claude Completion Gate" \
+  "claude_must_fix_approval" "$ux_exclusion_note"
+
+# 34k: this test block never triggered a real Telegram request or grew the
+# real repository's notification history.
+real_history_count_after_g34="$(wc -l < "$REAL_HISTORY_FILE" 2>/dev/null || echo 0)"
+assert_eq "34k: the real repository's notification_history.jsonl is unaffected by the Claude Report Push to PO tests" \
+  "$REAL_HISTORY_COUNT_BEFORE" "$real_history_count_after_g34"
+
+# 34l: configs/n8n/*.json remain unmodified.
+n8n_diff_g34="$(git -C /home/ivan/AI diff --stat configs/n8n/ 2>/dev/null || echo "")"
+assert_true "34l: configs/n8n/*.json show no diff (unmodified this Sprint)" "[[ -z \"\$n8n_diff_g34\" ]] && true || false"
+
+echo "  (Sprint-013/014/016/017 notify, notify-gate, and Gate metadata tests re-verified above, run unchanged in this same suite: zero regression)"
+
+###############################################################################
+# Test 35: Sprint-018 Must Fix Round 3 -- push-claude-report command
+###############################################################################
+echo ""
+echo "=== Test 35: push-claude-report command (Claude Report Push to PO, actual mechanism) ==="
+
+GATE35_ARTIFACTS="$TEST_DIR/gate35-artifacts"
+mkdir -p "$GATE35_ARTIFACTS/sprint-gate35/round-001"
+GATE35_REPORT_MARKER="GATE35-REPORT-MARKER-$$"
+GATE35_FILES_MARKER="GATE35-FILES-MARKER-$$"
+GATE35_TESTS_RUN_MARKER="GATE35-TESTSRUN-MARKER-$$"
+GATE35_TEST_RESULT_MARKER="GATE35-TESTRESULT-MARKER-$$"
+GATE35_DEVIATIONS_MARKER="GATE35-DEVIATIONS-MARKER-$$"
+GATE35_RISKS_MARKER="GATE35-RISKS-MARKER-$$"
+GATE35_NOT_DONE_MARKER="GATE35-NOTDONE-MARKER-$$"
+cat > "$GATE35_ARTIFACTS/sprint-gate35/round-001/claude_report.md" <<EOF
+# Claude Implementation Report
+## 1. Summary
+$GATE35_REPORT_MARKER
+## 4. Files Changed
+$GATE35_FILES_MARKER
+## 10. Tests Run
+$GATE35_TESTS_RUN_MARKER
+## 11. Test Result
+$GATE35_TEST_RESULT_MARKER
+## 12. Deviations
+$GATE35_DEVIATIONS_MARKER
+## 13. Risks
+$GATE35_RISKS_MARKER
+## 14. Not Done
+$GATE35_NOT_DONE_MARKER
+EOF
+cat > "$GATE35_ARTIFACTS/sprint-gate35/round-001/claude_fix_report.md" <<EOF
+# Claude Fix Report
+## 1. Summary
+$GATE35_REPORT_MARKER (fix)
+## 5. Files Changed
+$GATE35_FILES_MARKER (fix)
+## 7. Tests Run
+$GATE35_TESTS_RUN_MARKER (fix)
+## 8. Test Result
+$GATE35_TEST_RESULT_MARKER (fix)
+## 9. Deviations
+$GATE35_DEVIATIONS_MARKER (fix)
+## 10. Risks
+$GATE35_RISKS_MARKER (fix)
+## 11. Not Done
+$GATE35_NOT_DONE_MARKER (fix)
+EOF
+# A minimal-report fixture (no recognizable sections at all) to prove the
+# "Not found in report" fallback engages instead of silently dropping a
+# field or fabricating content.
+mkdir -p "$GATE35_ARTIFACTS/sprint-gate35-minimal/round-001"
+cat > "$GATE35_ARTIFACTS/sprint-gate35-minimal/round-001/claude_report.md" <<'EOF'
+# Just a title, no recognizable sections at all.
+EOF
+
+# 35a: help/usage output documents the new command.
+help_output35="$(bash "$BRIDGE" 2>&1 || true)"
+assert_contains "35a: help output documents push-claude-report" "push-claude-report" "$help_output35"
+assert_contains "35a-2: help output explains it never calls Codex / approves a Gate" "never calls Codex" "$help_output35"
+
+# 35b: without NOTIFICATION_ENABLED, the command writes the push artifact
+# and exits 0 without attempting Telegram delivery.
+PROJECT_ID=gate35 PROJECT_NAME="Gate35" REVIEWS_OVERRIDE="$GATE35_ARTIFACTS" \
+  bash "$BRIDGE" push-claude-report sprint-gate35 001 implementation >/tmp/gate35b.out 2>&1
+gate35b_exit=$?
+assert_exit_code "35b: push-claude-report (implementation, no NOTIFICATION_ENABLED) exits 0" 0 "$gate35b_exit"
+assert_contains "35b-2: output explains Telegram delivery was skipped" "skipping Telegram delivery" "$(cat /tmp/gate35b.out)"
+gate35b_pkg="$GATE35_ARTIFACTS/sprint-gate35/round-001/notifications/claude-report-push-claude_implementation_report_acceptance.md"
+assert_true "35b-3: push artifact was written" "[[ -f \"$gate35b_pkg\" ]] && true || false"
+gate35b_content="$(cat "$gate35b_pkg" 2>/dev/null || echo "")"
+rm -f /tmp/gate35b.out
+
+# 35c: the push artifact contains all 16 required content items (or their
+# fixed-wording equivalents) plus the real, verbatim report content.
+assert_contains "35c-01: push artifact has Sprint ID" "Sprint: sprint-gate35" "$gate35b_content"
+assert_contains "35c-02: push artifact has Round ID" "Round: round-001" "$gate35b_content"
+assert_contains "35c-03: push artifact has Current Gate" "Current Gate: claude_implementation_report_acceptance" "$gate35b_content"
+assert_contains "35c-04: push artifact has Completed actor" "Completed actor: Claude Code" "$gate35b_content"
+assert_contains "35c-05: push artifact has Completed artifact path" "Completed artifact path:" "$gate35b_content"
+assert_contains "35c-06: push artifact has a Claude Report Summary field containing the real summary text" "$GATE35_REPORT_MARKER" "$gate35b_content"
+assert_contains "35c-07: push artifact has a Files Changed field containing the real files-changed text" "$GATE35_FILES_MARKER" "$gate35b_content"
+assert_contains "35c-08: push artifact has a Tests Run field containing the real tests-run text" "$GATE35_TESTS_RUN_MARKER" "$gate35b_content"
+assert_contains "35c-09: push artifact has a Test Result field containing the real test-result text" "$GATE35_TEST_RESULT_MARKER" "$gate35b_content"
+assert_contains "35c-10a: push artifact has a Deviations field containing the real deviations text" "$GATE35_DEVIATIONS_MARKER" "$gate35b_content"
+assert_contains "35c-10b: push artifact has a Risks field containing the real risks text" "$GATE35_RISKS_MARKER" "$gate35b_content"
+assert_contains "35c-10c: push artifact has a Not Done field containing the real not-done text" "$GATE35_NOT_DONE_MARKER" "$gate35b_content"
+assert_contains "35c-10d: push artifact labels the Deviations/Risks/Not Done fields" "Deviations" "$gate35b_content"
+assert_contains "35c-11: push artifact has Product Owner Action Required" "Product Owner Action Required" "$gate35b_content"
+assert_contains "35c-12: push artifact has Product Owner Decision Options" "Product Owner Decision Options" "$gate35b_content"
+assert_contains "35c-13: push artifact has Suggested next actor" "Suggested next actor: Codex" "$gate35b_content"
+assert_contains "35c-14a: push artifact's safety warning states Claude did not call Codex" "Claude did not call Codex" "$gate35b_content"
+assert_contains "35c-14b: push artifact's safety warning states Claude did not approve the Gate" "Claude did not approve the Gate" "$gate35b_content"
+assert_contains "35c-14c: push artifact's safety warning states PO must manually decide" "Product Owner must manually decide whether to send this report to Codex" "$gate35b_content"
+assert_contains "35c-15: push artifact references the canonical Codex review checklist authority" "codex_review_handoff_policy.md" "$gate35b_content"
+assert_contains "35c-16: push artifact gives copy guidance for pairing report + canonical requirements" "連同" "$gate35b_content"
+
+# 35c-2: when the report has no sections recognizable by the extractor,
+# every one of the 5 report-derived fields must still appear with the
+# fixed fallback "Not found in report" -- never silently omitted, never
+# fabricated. mkdir already created above.
+PROJECT_ID=gate35 PROJECT_NAME="Gate35" REVIEWS_OVERRIDE="$GATE35_ARTIFACTS" \
+  bash "$BRIDGE" push-claude-report sprint-gate35-minimal 001 implementation >/dev/null 2>&1
+gate35c2_pkg="$GATE35_ARTIFACTS/sprint-gate35-minimal/round-001/notifications/claude-report-push-claude_implementation_report_acceptance.md"
+gate35c2_content="$(cat "$gate35c2_pkg" 2>/dev/null || echo "")"
+gate35c2_not_found_count="$(printf '%s' "$gate35c2_content" | grep -c '^Not found in report$')"
+assert_eq "35c-2: a report with no recognizable sections still shows 'Not found in report' for all 7 report-derived fields (summary, files changed, tests run, test result, deviations, risks, not done)" \
+  "7" "$gate35c2_not_found_count"
+
+# 35d: fix report type resolves to the Gate 14 gate_id and default filename.
+PROJECT_ID=gate35 PROJECT_NAME="Gate35" REVIEWS_OVERRIDE="$GATE35_ARTIFACTS" \
+  bash "$BRIDGE" push-claude-report sprint-gate35 001 fix >/dev/null 2>&1
+gate35d_pkg="$GATE35_ARTIFACTS/sprint-gate35/round-001/notifications/claude-report-push-claude_must_fix_report_acceptance.md"
+assert_true "35d: fix report type writes a push artifact for claude_must_fix_report_acceptance" "[[ -f \"$gate35d_pkg\" ]] && true || false"
+gate35d_content="$(cat "$gate35d_pkg" 2>/dev/null || echo "")"
+assert_contains "35d-2: fix push artifact has the correct Current Gate" "Current Gate: claude_must_fix_report_acceptance" "$gate35d_content"
+
+# 35e: an explicit report-path override is honored (for round-specific fix
+# reports like claude_fix_report_round_2.md).
+GATE35_CUSTOM_MARKER="GATE35-CUSTOM-MARKER-$$"
+echo "$GATE35_CUSTOM_MARKER" > "$GATE35_ARTIFACTS/sprint-gate35/round-001/claude_fix_report_round_2.md"
+PROJECT_ID=gate35 PROJECT_NAME="Gate35" REVIEWS_OVERRIDE="$GATE35_ARTIFACTS" \
+  bash "$BRIDGE" push-claude-report sprint-gate35 001 fix \
+  "$GATE35_ARTIFACTS/sprint-gate35/round-001/claude_fix_report_round_2.md" >/dev/null 2>&1
+gate35e_content="$(cat "$gate35d_pkg" 2>/dev/null || echo "")"
+assert_contains "35e: an explicit report-path override is inlined verbatim" "$GATE35_CUSTOM_MARKER" "$gate35e_content"
+
+# 35f: a missing report artifact fails loudly instead of silently producing
+# an empty or fabricated push.
+PROJECT_ID=gate35 PROJECT_NAME="Gate35" REVIEWS_OVERRIDE="$GATE35_ARTIFACTS" \
+  bash "$BRIDGE" push-claude-report sprint-gate35 999 implementation >/tmp/gate35f.out 2>&1
+assert_exit_code "35f: a missing report artifact fails loudly" 1 "$?"
+assert_contains "35f-2: the error names the missing path" "not found" "$(cat /tmp/gate35f.out)"
+rm -f /tmp/gate35f.out
+
+# 35g: an invalid report-type fails loudly.
+PROJECT_ID=gate35 PROJECT_NAME="Gate35" REVIEWS_OVERRIDE="$GATE35_ARTIFACTS" \
+  bash "$BRIDGE" push-claude-report sprint-gate35 001 bogus >/tmp/gate35g.out 2>&1
+assert_exit_code "35g: an invalid report-type fails loudly" 1 "$?"
+assert_contains "35g-2: the error names the invalid report-type" "Invalid report-type" "$(cat /tmp/gate35g.out)"
+rm -f /tmp/gate35g.out
+
+# 35h: fake-curl delivery test -- with NOTIFICATION_ENABLED=true, the
+# command sends the metadata block and the report content as separate
+# Telegram messages (never touches real Telegram; fake curl only).
+GATE35_FAKE_BIN="$TEST_DIR/gate35-fake-bin"
+mkdir -p "$GATE35_FAKE_BIN"
+cat > "$GATE35_FAKE_BIN/curl" <<'STUB'
+#!/usr/bin/env bash
+n=1
+while [[ -f "$CAPTURED_MESSAGES_DIR/msg-$(printf '%02d' "$n").txt" ]]; do n=$((n+1)); done
+for a in "$@"; do
+  case "$a" in
+    text@*) cp "${a#text@}" "$CAPTURED_MESSAGES_DIR/msg-$(printf '%02d' "$n").txt" ;;
+  esac
+done
+echo '{"ok":true}'
+exit 0
+STUB
+chmod +x "$GATE35_FAKE_BIN/curl"
+GATE35_MSGS="$TEST_DIR/gate35-msgs"
+mkdir -p "$GATE35_MSGS"
+PATH="$GATE35_FAKE_BIN:$PATH" CAPTURED_MESSAGES_DIR="$GATE35_MSGS" \
+  PROJECT_ID=gate35 PROJECT_NAME="Gate35" NOTIFICATION_ENABLED=true \
+  TELEGRAM_BOT_TOKEN=tok TELEGRAM_CHAT_ID=1 REVIEWS_OVERRIDE="$GATE35_ARTIFACTS" \
+  bash "$BRIDGE" push-claude-report sprint-gate35 001 implementation >/tmp/gate35h.out 2>&1
+gate35h_msg_count="$(ls "$GATE35_MSGS"/msg-*.txt 2>/dev/null | wc -l)"
+assert_true "35h: fake Telegram delivery sends at least 2 messages (metadata + report content)" \
+  "[[ $gate35h_msg_count -ge 2 ]] && true || false"
+assert_contains "35h-2: delivery is reported as delivered" "delivered" "$(cat /tmp/gate35h.out)"
+gate35h_msg1="$(cat "$GATE35_MSGS/msg-01.txt" 2>/dev/null || echo "")"
+assert_contains "35h-3: Message 1 is the metadata/safety-warning block" "Safety Warning" "$gate35h_msg1"
+gate35h_all_msgs="$(cat "$GATE35_MSGS"/msg-*.txt 2>/dev/null)"
+assert_contains "35h-4: the real report content appears somewhere across the sent messages" "$GATE35_REPORT_MARKER" "$gate35h_all_msgs"
+
+# 35h-5..35h-11: Telegram Message 1 (the Product Owner-readable summary,
+# not the raw report content in later messages) must, on its own, contain
+# all 16 Section 26.2 fields -- Product Owner should never have to search
+# through the full raw report just to see these.
+assert_contains "35h-5: Message 1 has the Claude Report Summary field with real content" "$GATE35_REPORT_MARKER" "$gate35h_msg1"
+assert_contains "35h-6: Message 1 has the Files Changed field with real content" "$GATE35_FILES_MARKER" "$gate35h_msg1"
+assert_contains "35h-7: Message 1 has the Tests Run field with real content" "$GATE35_TESTS_RUN_MARKER" "$gate35h_msg1"
+assert_contains "35h-8: Message 1 has the Test Result field with real content" "$GATE35_TEST_RESULT_MARKER" "$gate35h_msg1"
+assert_contains "35h-9: Message 1 has the Deviations field with real content" "$GATE35_DEVIATIONS_MARKER" "$gate35h_msg1"
+assert_contains "35h-10: Message 1 has the Risks field with real content" "$GATE35_RISKS_MARKER" "$gate35h_msg1"
+assert_contains "35h-11: Message 1 has the Not Done field with real content" "$GATE35_NOT_DONE_MARKER" "$gate35h_msg1"
+rm -f /tmp/gate35h.out
+
+# 35i: history record uses "Codex" as next_actor and "low" as risk_level,
+# and does not affect the real repository's notification_history.jsonl
+# (REVIEWS_OVERRIDE isolation).
+gate35i_history="$GATE35_ARTIFACTS/notification_history.jsonl"
+assert_true "35i: an isolated notification_history.jsonl was written under REVIEWS_OVERRIDE" \
+  "[[ -f \"$gate35i_history\" ]] && true || false"
+assert_contains "35i-2: history record has next_actor Codex" '"next_actor": "Codex"' "$(cat "$gate35i_history" 2>/dev/null || echo "")"
+real_history_count_after_g35="$(wc -l < "$REAL_HISTORY_FILE" 2>/dev/null || echo 0)"
+assert_eq "35i-3: the real repository's notification_history.jsonl is unaffected by push-claude-report tests" \
+  "$REAL_HISTORY_COUNT_BEFORE" "$real_history_count_after_g35"
+
+# 35m: Sprint-018 Must Fix Round 5 -- push-claude-report now records a
+# Notification History entry even when NOTIFICATION_ENABLED is unset
+# (delivery_status="disabled"), instead of the previous behavior of an
+# early `return 0` that skipped history entirely, leaving no audit trail
+# of whether a push was ever attempted. Reuses the 35b invocation above
+# (NOTIFICATION_ENABLED unset, isolated history at $gate35i_history).
+gate35m_line="$(grep '"gate_id": "claude_implementation_report_acceptance"' "$gate35i_history" 2>/dev/null || echo "")"
+assert_contains "35m: a disabled-delivery history record exists for the NOTIFICATION_ENABLED-unset invocation" \
+  '"delivery_status": "disabled"' "$gate35m_line"
+
+# 35n: NOTIFICATION_ENABLED=true but missing TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID
+# is also recorded as "disabled", not "failed" -- consistent with the
+# existing cmd_notify / cmd_notify_gate convention that "not fully
+# configured" is a distinct, non-error state.
+rm -rf "$TEST_DIR/gate35n-artifacts"
+mkdir -p "$TEST_DIR/gate35n-artifacts/sprint-gate35n/round-001"
+echo "# Real content" > "$TEST_DIR/gate35n-artifacts/sprint-gate35n/round-001/claude_report.md"
+PROJECT_ID=gate35n PROJECT_NAME="Gate35n" NOTIFICATION_ENABLED=true \
+  REVIEWS_OVERRIDE="$TEST_DIR/gate35n-artifacts" \
+  bash "$BRIDGE" push-claude-report sprint-gate35n 001 implementation >/tmp/gate35n.out 2>&1
+assert_exit_code "35n: NOTIFICATION_ENABLED=true without token/chat_id still exits 0" 0 "$?"
+gate35n_history="$TEST_DIR/gate35n-artifacts/notification_history.jsonl"
+gate35n_line="$(grep '"gate_id": "claude_implementation_report_acceptance"' "$gate35n_history" 2>/dev/null || echo "")"
+assert_contains "35n-2: missing token/chat_id is recorded as disabled, not failed" \
+  '"delivery_status": "disabled"' "$gate35n_line"
+assert_contains "35n-3: error_message explains why delivery is disabled" \
+  "TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID not set" "$gate35n_line"
+rm -f /tmp/gate35n.out
+real_history_count_after_g35n="$(wc -l < "$REAL_HISTORY_FILE" 2>/dev/null || echo 0)"
+assert_eq "35n-4: the real repository's notification_history.jsonl is still unaffected" \
+  "$REAL_HISTORY_COUNT_BEFORE" "$real_history_count_after_g35n"
+
+# 35j: configs/n8n/*.json remain unmodified, and scripts/review_bridge.sh's
+# pre-existing 586 tests (everything up through Test 34) still pass -- this
+# is proven by this very test run reaching Test 35 with zero prior FAIL, so
+# only the n8n check is asserted directly here.
+n8n_diff_g35="$(git -C /home/ivan/AI diff --stat configs/n8n/ 2>/dev/null || echo "")"
+assert_true "35j: configs/n8n/*.json show no diff (unmodified this Sprint)" "[[ -z \"\$n8n_diff_g35\" ]] && true || false"
+
+# 35k/35l: static check that cmd_push_claude_report's own function body
+# never calls Codex, never auto-approves a Gate, and stays opt-in for
+# Telegram delivery -- structural proof, not just behavioral observation.
+cmd_push_claude_report_body="$(awk '/^cmd_push_claude_report\(\) \{/{flag=1} flag{print} /^\}/{if(flag) exit}' "$BRIDGE")"
+assert_true "35k: cmd_push_claude_report never calls cmd_notify_gate or any Codex-invoking function" \
+  "[[ \"\$cmd_push_claude_report_body\" != *'cmd_notify_gate'* && \"\$cmd_push_claude_report_body\" != *'call_codex'* && \"\$cmd_push_claude_report_body\" != *'invoke_codex'* ]] && true || false"
+assert_contains "35l: cmd_push_claude_report's delivery path is gated behind NOTIFICATION_ENABLED" \
+  'NOTIFICATION_ENABLED' "$cmd_push_claude_report_body"
+
+echo "  (Sprint-013/014/016/017 notify, notify-gate, and Gate metadata tests re-verified above, run unchanged in this same suite: zero regression)"
+
+###############################################################################
+# Test 36: Sprint-018 Must Fix Round 5 -- Claude Report Push execution
+# responsibility gap fix (process/doc contract + notification history audit
+# trail). This is what actually closes the gap Product Owner reported: Round
+# 4 completed the 16-field content contract, but nothing required
+# push-claude-report to ever run after Claude Code finished a report, so
+# Product Owner never got a proactive Telegram notification without first
+# remembering to run the command by hand.
+###############################################################################
+echo ""
+echo "=== Test 36: Claude Report Push execution responsibility (Round 5) ==="
+
+telegram_spec36="$(cat /home/ivan/AI/docs/development/telegram-po-gate-notification-specification.md 2>/dev/null || echo "")"
+assert_contains "36a: telegram spec documents the Claude Report Push 執行責任 section" \
+  "Claude Report Push 執行責任" "$telegram_spec36"
+assert_contains "36b: telegram spec documents the Claude Report Completion Notification Step rule" \
+  "Claude Report Completion Notification Step" "$telegram_spec36"
+assert_contains "36c: telegram spec requires a Telegram Push Status report section" \
+  "## Telegram Push Status" "$telegram_spec36"
+assert_contains "36d: telegram spec scopes the execution exception to push-claude-report, not notify-gate" \
+  "僅限 \`push-claude-report\`" "$telegram_spec36"
+assert_contains "36e: telegram spec corrects the Round 3 notify-gate/push-claude-report wording mix-up" \
+  "勘誤（Sprint-018 Must Fix Round 5）" "$telegram_spec36"
+
+consensus_doc36="$(cat /home/ivan/AI/docs/development/consensus-workflow.md 2>/dev/null || echo "")"
+assert_contains "36g: consensus-workflow.md documents the Claude Report Completion Notification Step" \
+  "Claude Report Completion Notification Step" "$consensus_doc36"
+assert_contains "36h: consensus-workflow.md forbids Claude Code from reading/printing the Telegram env values" \
+  "never reads, prints, logs" "$consensus_doc36"
+assert_contains "36i: consensus-workflow.md states the notify-gate Execution Policy is unchanged" \
+  "does not change the \`notify-gate\` Execution Policy" "$consensus_doc36"
+
+ux_doc36="$(cat /home/ivan/AI/docs/development/product-owner-gate-operation-ux.md 2>/dev/null || echo "")"
+assert_contains "36j: product-owner-gate-operation-ux.md documents the Round 5 flow correction" \
+  "Sprint-018 Must Fix Round 5 建立" "$ux_doc36"
+assert_contains "36k: product-owner-gate-operation-ux.md explains why Round 4 Telegram Live Validation was NOT PASS" \
+  "Telegram Live Validation 判定 NOT PASS" "$ux_doc36"
+assert_contains "36k-2: product-owner-gate-operation-ux.md states notify-gate's human-only rule is unaffected" \
+  "notify-gate\` 的人工限定" "$ux_doc36"
+
+# 36l: this test block never triggered a real Telegram request or grew the
+# real repository's notification history (pure doc-content assertions).
+real_history_count_after_g36="$(wc -l < "$REAL_HISTORY_FILE" 2>/dev/null || echo 0)"
+assert_eq "36l: the real repository's notification_history.jsonl is unaffected by Test 36" \
+  "$REAL_HISTORY_COUNT_BEFORE" "$real_history_count_after_g36"
+
+# 36m: configs/n8n/*.json remain unmodified.
+n8n_diff_g36="$(git -C /home/ivan/AI diff --stat configs/n8n/ 2>/dev/null || echo "")"
+assert_true "36m: configs/n8n/*.json show no diff (unmodified this round)" "[[ -z \"\$n8n_diff_g36\" ]] && true || false"
+
+###############################################################################
+# Test 37: Sprint-018 Must Fix Round 6 -- unconditional completion
+# notification invocation (End-to-End Claude Completion Notification Live
+# Validation)
+###############################################################################
+echo ""
+echo "=== Test 37: unconditional push-claude-report invocation (Round 6) ==="
+
+telegram_spec37="$(cat /home/ivan/AI/docs/development/telegram-po-gate-notification-specification.md 2>/dev/null || echo "")"
+consensus_doc37="$(cat /home/ivan/AI/docs/development/consensus-workflow.md 2>/dev/null || echo "")"
+ux_doc37="$(cat /home/ivan/AI/docs/development/product-owner-gate-operation-ux.md 2>/dev/null || echo "")"
+
+# 37a: the Round 5 conditional-invocation prohibition ("must not run the
+# command when env is missing") must be gone as an ACTIVE rule from both
+# documents -- regression guard against silently reverting to the design
+# that caused Product Owner Live Flow Validation to FAIL. Matched as the
+# exact enumerated bullet text from Round 5 (not just any mention of the
+# words, since Round 6's own historical-context narration legitimately
+# still describes what Round 5 used to require).
+telegram_spec_old_rule_bullet="$(grep -c '任一變數缺少時.*：Claude Code.*不得.*執行' /home/ivan/AI/docs/development/telegram-po-gate-notification-specification.md || true)"
+assert_eq "37a-1: telegram spec no longer has the Round 5 active-rule bullet instructing Claude Code to skip invocation" \
+  "0" "${telegram_spec_old_rule_bullet:-0}"
+consensus_old_rule_bullet="$(grep -c 'If any is missing, Claude Code must not run the command' /home/ivan/AI/docs/development/consensus-workflow.md || true)"
+assert_eq "37a-2: consensus-workflow.md no longer has the Round 5 active-rule bullet instructing Claude Code to skip invocation" \
+  "0" "${consensus_old_rule_bullet:-0}"
+
+# 37b: all 3 documents state the invocation is now unconditional.
+assert_contains "37b-1: telegram spec documents unconditional invocation" "一律" "$telegram_spec37"
+assert_contains "37b-2: consensus-workflow.md documents unconditional invocation" "unconditionally runs" "$consensus_doc37"
+assert_contains "37b-3: product-owner-gate-operation-ux.md documents unconditional invocation" "一律執行" "$ux_doc37"
+
+# 37c: all 3 documents establish the non-secret PROJECT_ID/PROJECT_NAME
+# convention that prevents the command from dying for lack of them.
+assert_contains "37c-1: telegram spec documents the PROJECT_ID=ai-workspace convention" "PROJECT_ID=ai-workspace" "$telegram_spec37"
+assert_contains "37c-2: consensus-workflow.md documents the PROJECT_ID=ai-workspace convention" "PROJECT_ID=ai-workspace" "$consensus_doc37"
+assert_contains "37c-3: product-owner-gate-operation-ux.md documents the PROJECT_ID=ai-workspace convention" "PROJECT_ID=ai-workspace" "$ux_doc37"
+
+# 37d: the Product Owner Live Flow Validation acceptance criterion (Section
+# 27.7) is documented, including the explicit "PO did not manually run it"
+# framing required by this round's Handoff Package.
+assert_contains "37d-1: telegram spec has the Product Owner Live Flow Validation acceptance criterion section" \
+  "Product Owner Live Flow Validation 驗收標準" "$telegram_spec37"
+assert_contains "37d-2: the acceptance criterion explicitly requires PO did NOT manually run push-claude-report" \
+  "Product Owner 未手動執行 push-claude-report" "$telegram_spec37"
+assert_contains "37d-3: the acceptance criterion requires a real notification_history.jsonl record as evidence" \
+  "reviews/notification_history.jsonl 看到一筆新的" "$telegram_spec37"
+
+# 37e: "Push attempted" is now documented as normally always YES (not a
+# normal NO for missing Telegram env, which was Round 5's design).
+assert_contains "37e: telegram spec documents Push attempted as normally always YES" \
+  "Push attempted\` 應該**恆為 YES**" "$telegram_spec37"
+
+# 37f: behavioral re-confirmation, using the EXACT invocation pattern the
+# completion step now uses (PROJECT_ID/PROJECT_NAME supplied directly,
+# Telegram vars absent) -- the command must run to completion (not die),
+# write a real push artifact, and write a "disabled" history record, all
+# within an isolated REVIEWS_OVERRIDE directory (never the real repo).
+GATE37_ARTIFACTS="$TEST_DIR/gate37-artifacts"
+mkdir -p "$GATE37_ARTIFACTS/sprint-gate37/round-001"
+echo "## 1. Summary"$'\n'"gate37 completion step test" > "$GATE37_ARTIFACTS/sprint-gate37/round-001/claude_fix_report.md"
+env -u NOTIFICATION_ENABLED -u TELEGRAM_BOT_TOKEN -u TELEGRAM_CHAT_ID \
+  PROJECT_ID=ai-workspace PROJECT_NAME="AI Workspace" REVIEWS_OVERRIDE="$GATE37_ARTIFACTS" \
+  bash "$BRIDGE" push-claude-report sprint-gate37 001 fix >/tmp/gate37f.out 2>&1
+gate37f_exit=$?
+assert_exit_code "37f: the completion-step invocation pattern (PROJECT_ID/PROJECT_NAME supplied, Telegram vars absent) exits 0, not dying" \
+  0 "$gate37f_exit"
+gate37f_pkg="$GATE37_ARTIFACTS/sprint-gate37/round-001/notifications/claude-report-push-claude_must_fix_report_acceptance.md"
+assert_true "37f-2: a real push artifact was written even though Telegram vars were absent" \
+  "[[ -f \"$gate37f_pkg\" ]] && true || false"
+gate37f_history="$GATE37_ARTIFACTS/notification_history.jsonl"
+assert_contains "37f-3: the isolated notification_history.jsonl records delivery_status disabled" \
+  '"delivery_status": "disabled"' "$(cat "$gate37f_history" 2>/dev/null || echo "")"
+rm -f /tmp/gate37f.out
+
+# 37g: this test block never triggered a real Telegram request or grew the
+# real repository's notification history.
+real_history_count_after_g37="$(wc -l < "$REAL_HISTORY_FILE" 2>/dev/null || echo 0)"
+assert_eq "37g: the real repository's notification_history.jsonl is unaffected by Test 37" \
+  "$REAL_HISTORY_COUNT_BEFORE" "$real_history_count_after_g37"
+
+# 37h: configs/n8n/*.json remain unmodified.
+n8n_diff_g37="$(git -C /home/ivan/AI diff --stat configs/n8n/ 2>/dev/null || echo "")"
+assert_true "37h: configs/n8n/*.json show no diff (unmodified this round)" "[[ -z \"\$n8n_diff_g37\" ]] && true || false"
+
+echo "  (Sprint-013/014/016/017 notify, notify-gate, and Gate metadata tests re-verified above, run unchanged in this same suite: zero regression)"
+
+###############################################################################
 # Sprint-004 E2E compatibility
 ###############################################################################
 echo ""

@@ -55,6 +55,16 @@ Commands:
                               docs/development/telegram-po-gate-notification-specification.md).
                               Requires PROJECT_ID and PROJECT_NAME env vars. Best-effort, no
                               deduplication (every Gate trigger is a distinct decision point).
+  push-claude-report          <sprint-id> <round> <implementation|fix> [report-path]
+                              Push a completed Claude Implementation Report or Claude Fix Report to
+                              Product Owner via Telegram (Claude Report Push to PO -- see
+                              docs/development/product-owner-gate-operation-ux.md Section 5 and
+                              docs/development/telegram-po-gate-notification-specification.md
+                              Section 26). This is a notification only: it never calls Codex, never
+                              approves a Gate, and never decides Codex Review scope/checklist.
+                              Requires PROJECT_ID and PROJECT_NAME env vars. Best-effort delivery,
+                              same opt-in mechanism as notify-gate (NOTIFICATION_ENABLED=true +
+                              TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID).
 
 Notes:
   - skeleton creates placeholder input artifacts only.
@@ -2749,6 +2759,311 @@ EOF
   return 0
 }
 
+# Sprint-018 Must Fix Round 4: best-effort extraction of a named Markdown
+# section's body from a Claude Report, by heading text (case-insensitive
+# substring match against any one or more candidate patterns; the first
+# heading line matching ANY pattern wins for that pattern, and all matched
+# sections across patterns are concatenated in document order). Content is
+# passed via argv (same convention as _gate_write_history / _notify_gate_
+# extract_target_ai elsewhere in this file) rather than piped over stdin,
+# because `python3 - <<'PY' ... PY` already uses stdin to deliver the
+# script itself -- piping data into the same stdin would silently starve
+# the script's own input read. Returns the literal string "Not found in
+# report" (never an empty string or a fabricated value) when no candidate
+# heading matches -- callers must never silently drop a field just because
+# extraction failed.
+_push_claude_report_extract_section() {
+  local content="$1"; shift
+  local extracted
+  extracted="$(python3 - "$content" "$@" <<'PY'
+import re
+import sys
+
+content = sys.argv[1]
+patterns = sys.argv[2:]
+
+lines = content.splitlines()
+heading_re = re.compile(r'^#{1,6}\s+(.*)$')
+headings = []
+for i, line in enumerate(lines):
+    m = heading_re.match(line)
+    if m:
+        headings.append((m.group(1), i))
+
+results = []
+for pat in patterns:
+    pat_re = re.compile(pat, re.IGNORECASE)
+    for idx, (heading_text, start) in enumerate(headings):
+        if pat_re.search(heading_text):
+            end = headings[idx + 1][1] if idx + 1 < len(headings) else len(lines)
+            body = "\n".join(lines[start + 1:end]).strip()
+            if body:
+                results.append(body)
+            break
+
+print("\n\n".join(results))
+PY
+)"
+  if [[ -z "$extracted" ]]; then
+    printf '%s' "Not found in report"
+  else
+    printf '%s' "$extracted"
+  fi
+}
+
+###############################################################################
+# Command: push-claude-report (Sprint-018 Must Fix Round 3; 16-field content
+# contract completed in Must Fix Round 4; Claude Code completion-triggered
+# execution responsibility added in Must Fix Round 5)
+###############################################################################
+#
+# Claude Report Push to Product Owner: an explicit CLI command (never
+# auto-invoked by any other function in this file -- no code path here
+# calls it) that packages an already-written Claude Implementation Report
+# or Claude Fix Report artifact into a Telegram-ready Notification
+# Package, and optionally delivers it to Telegram using the same opt-in
+# mechanism (NOTIFICATION_ENABLED=true + TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID).
+#
+# Unlike notify-gate (which remains exclusively Product-Owner-triggered,
+# see the notify-gate Execution Policy above cmd_notify_gate), Sprint-018
+# Must Fix Round 5 authorizes Claude Code itself to run this specific
+# command from outside this script, as the last step of completing a
+# report, but only when the required env vars are already present locally
+# -- see docs/development/telegram-po-gate-notification-specification.md
+# Section 27 and docs/development/consensus-workflow.md's Claude Report
+# Completion Notification Step. This file's own execution-policy guarantee
+# is unchanged either way: nothing in review_bridge.sh calls this function
+# programmatically.
+#
+# This is explicitly NOT a Gate approval and NOT a handoff to Codex: the
+# rendered content carries a fixed, non-negotiable safety warning and a
+# reminder that any Codex Review Handoff must be composed from
+# codex_review_handoff_policy.md, never from this report alone. See
+# docs/development/product-owner-gate-operation-ux.md Section 5 and
+# docs/development/telegram-po-gate-notification-specification.md Section 26.
+cmd_push_claude_report() {
+  local usage_msg="Usage: review_bridge.sh push-claude-report <sprint-id> <round> <implementation|fix> [report-path]"
+  local sprint_id="${1:?$usage_msg}"
+  shift
+  local round="${1:?$usage_msg}"
+  shift
+  local report_type="${1:?$usage_msg}"
+  shift
+
+  # Optional 4th positional argument: an explicit report path, for Sprints
+  # whose report artifact is not at the default location (e.g. a
+  # round-specific fix report like claude_fix_report_round_2.md).
+  local report_path_override=""
+  if [[ $# -gt 0 && "$1" != --* ]]; then
+    report_path_override="$1"
+    shift
+  fi
+
+  parse_dry_run "$@"
+
+  validate_id "$sprint_id" "sprint-id"
+  round="$(validate_round "$round")"
+  local round_id="round-$round"
+
+  local project_id="${PROJECT_ID:-}"
+  local project_name="${PROJECT_NAME:-}"
+  [[ -z "$project_id" ]] && die "PROJECT_ID environment variable is required (no default is assumed)"
+  [[ -z "$project_name" ]] && die "PROJECT_NAME environment variable is required (no default is assumed)"
+
+  # gate_id / po_decision_options are fixed, canonical values mirroring
+  # gate_notification_matrix.md Gate 4 / Gate 14 -- not invented here, only
+  # duplicated as source constants (same pattern as _gate_resolve_metadata's
+  # per-gate case statement).
+  local gate_id report_default_name po_decision_options
+  case "$report_type" in
+    implementation)
+      gate_id="claude_implementation_report_acceptance"
+      report_default_name="claude_report.md"
+      po_decision_options="驗收通過，送交 Codex Review / 要求補充說明 / 退回重做"
+      ;;
+    fix)
+      gate_id="claude_must_fix_report_acceptance"
+      report_default_name="claude_fix_report.md"
+      po_decision_options="驗收通過，送交 Codex Final Review / 要求補充說明 / 退回重做"
+      ;;
+    *)
+      die "Invalid report-type: '$report_type' (must be 'implementation' or 'fix')"
+      ;;
+  esac
+
+  local round_dir="$REVIEWS_DIR/$sprint_id/round-$round"
+  local report_path="${report_path_override:-$round_dir/$report_default_name}"
+
+  if [[ "$report_path" == *".."* ]]; then
+    die "Invalid report-path: '$report_path' (contains forbidden characters)"
+  fi
+  [[ -f "$report_path" ]] || die "Claude report artifact not found: $report_path (pass an explicit path as the 4th argument if it is not at the default location)"
+
+  local report_content
+  report_content="$(cat "$report_path")"
+
+  local created_at
+  created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  # Sprint-018 Must Fix Round 4: best-effort extraction of the Telegram spec
+  # Section 26.2 fields that come FROM the report's own content (items 6-10).
+  # Each call always returns real, verbatim text lifted from the report, or
+  # the literal fallback "Not found in report" -- never fabricated content,
+  # and never a silently-dropped field.
+  local report_summary report_files_changed report_tests_run report_test_result
+  local report_deviations report_risks report_not_done
+  report_summary="$(_push_claude_report_extract_section "$report_content" 'Summary')"
+  report_files_changed="$(_push_claude_report_extract_section "$report_content" 'Files Changed' 'Files Added')"
+  report_tests_run="$(_push_claude_report_extract_section "$report_content" 'Tests Run' 'Test Changes')"
+  report_test_result="$(_push_claude_report_extract_section "$report_content" 'Test Result')"
+  report_deviations="$(_push_claude_report_extract_section "$report_content" 'Deviations')"
+  report_risks="$(_push_claude_report_extract_section "$report_content" 'Risks')"
+  report_not_done="$(_push_claude_report_extract_section "$report_content" 'Not Done')"
+
+  local metadata_block
+  metadata_block="$(cat <<EOF
+🔔 Claude Report Push to Product Owner
+Sprint: ${sprint_id}
+Round: ${round_id}
+Current Gate: ${gate_id}
+Completed actor: Claude Code
+Completed artifact path: ${report_path}
+Created at: ${created_at}
+
+📝 Claude Report Summary
+${report_summary}
+
+📂 Files Changed
+${report_files_changed}
+
+🧪 Tests Run
+${report_tests_run}
+
+✅ Test Result
+${report_test_result}
+
+⚠️ Deviations
+${report_deviations}
+
+⚠️ Risks
+${report_risks}
+
+⚠️ Not Done
+${report_not_done}
+
+⚠️ Safety Warning
+- Claude did not call Codex.
+- Claude did not approve the Gate.
+- Product Owner must manually decide whether to send this report to Codex.
+
+✅ Product Owner Action Required
+請審閱下一則訊息中的 Claude Report 內容，決定是否送交 Codex Review。
+
+✅ Product Owner Decision Options
+${po_decision_options}
+
+➡️ Suggested next actor: Codex
+
+📋 Codex Review Instruction Source
+canonical template / codex_review_handoff_policy.md（Claude Report 只是 review input，不是 review authority；若決定送交 Codex，必須同時附上 codex_review_handoff_policy.md 的 canonical Codex Review 要求，不得只貼 Claude Report 本身）
+
+📋 Copy Guidance
+Product Owner 若決定送交 Codex，請把下一則訊息的 Claude Report 內容，連同 codex_review_handoff_policy.md 的 canonical Codex Review 要求一起貼給 Codex。
+EOF
+)"
+
+  local push_dir="$round_dir/notifications"
+  mkdir -p "$push_dir"
+  local push_path="$push_dir/claude-report-push-${gate_id}.md"
+
+  cat > "$push_path" <<EOF
+${metadata_block}
+
+📄 Claude Report Content（逐字引用，未經摘要或改寫）
+---
+${report_content}
+---
+EOF
+
+  echo "Written: $push_path"
+
+  local telegram_bot_token="${TELEGRAM_BOT_TOKEN:-}"
+  local telegram_chat_id="${TELEGRAM_CHAT_ID:-}"
+  local history_file="$REVIEWS_DIR/notification_history.jsonl"
+  local delivery_status delivered_at error_message
+  delivered_at=""
+  error_message=""
+
+  # Sprint-018 Must Fix Round 5: every invocation is recorded in Notification
+  # History -- including the not-yet-configured case (previously an early
+  # `return 0` here skipped history entirely) -- so the Claude Report
+  # Completion Notification Step (see
+  # docs/development/telegram-po-gate-notification-specification.md Section
+  # 27) leaves a verifiable trail of whether a push was attempted, not just
+  # a terminal message nobody may re-read. This mirrors the "disabled"
+  # convention already used by the other notification commands in this file.
+  if [[ "${NOTIFICATION_ENABLED:-false}" != "true" ]]; then
+    delivery_status="disabled"
+    echo "NOTIFICATION_ENABLED is not 'true' -- skipping Telegram delivery. Report artifact written above; Product Owner can review it directly, or re-run with NOTIFICATION_ENABLED=true and TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID set to push it to Telegram."
+  elif [[ -z "$telegram_bot_token" || -z "$telegram_chat_id" ]]; then
+    delivery_status="disabled"
+    error_message="NOTIFICATION_ENABLED=true but TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID not set"
+    echo "WARNING: $error_message. Continuing without blocking the workflow." >&2
+  elif ! command -v curl >/dev/null 2>&1; then
+    delivery_status="failed"
+    error_message="curl not available"
+    echo "WARNING: $error_message. Continuing without blocking the workflow." >&2
+  else
+    local push_message_dir
+    push_message_dir="$(mktemp -d)"
+    printf '%s' "$metadata_block" > "$push_message_dir/msg-01-metadata.txt"
+
+    local report_chunk_dir="$push_message_dir/report-chunks"
+    mkdir -p "$report_chunk_dir"
+    printf '%s' "$report_content" > "$push_message_dir/report-source.txt"
+    _notify_split_for_telegram "$push_message_dir/report-source.txt" "$report_chunk_dir"
+
+    local -a push_message_files=("$push_message_dir/msg-01-metadata.txt")
+    local chunk_file
+    for chunk_file in "$report_chunk_dir"/chunk-*.txt; do
+      [[ -f "$chunk_file" ]] && push_message_files+=("$chunk_file")
+    done
+
+    local all_ok=true
+    local msg_file
+    for msg_file in "${push_message_files[@]}"; do
+      local telegram_url="https://api.telegram.org/bot${telegram_bot_token}/sendMessage"
+      local response
+      if response="$(curl -fsS --max-time 5 -X POST "$telegram_url" \
+            --data-urlencode "chat_id=${telegram_chat_id}" \
+            --data-urlencode "text@${msg_file}" 2>/dev/null)"; then
+        echo "$response" | grep -q '"ok":true' || all_ok=false
+      else
+        all_ok=false
+      fi
+    done
+    rm -rf "$push_message_dir"
+
+    if $all_ok; then
+      delivery_status="delivered"
+      delivered_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      echo "Telegram delivery: delivered (Claude Report Push to Product Owner)."
+    else
+      delivery_status="failed"
+      error_message="Telegram API request failed for at least one message"
+      echo "WARNING: Telegram API request failed. Continuing without blocking the workflow." >&2
+    fi
+  fi
+
+  _gate_write_history "$history_file" \
+    "$project_id" "$project_name" "$sprint_id" "$round_id" "$gate_id" \
+    "Codex" "low" "$push_path" "telegram" \
+    "$delivery_status" "$created_at" "$delivered_at" "$error_message"
+
+  echo "Notification history updated: $history_file (delivery_status=$delivery_status)"
+  return 0
+}
+
 ###############################################################################
 # Main dispatcher
 ###############################################################################
@@ -2767,5 +3082,6 @@ case "$COMMAND" in
   finalize)              cmd_finalize "$@" ;;
   notify)                cmd_notify "$@" ;;
   notify-gate)           cmd_notify_gate "$@" ;;
+  push-claude-report)    cmd_push_claude_report "$@" ;;
   *)                     die_usage "Unknown command: '$COMMAND'." ;;
 esac
